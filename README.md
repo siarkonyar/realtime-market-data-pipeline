@@ -2,9 +2,11 @@
 
 # 📈 Live Stock Trades: a real-time ELT pipeline
 
-**Streams live US stock trades from Finnhub, stores every tick in PostgreSQL, caches live prices in Redis,
-rolls ticks up into one-minute candles, and serves them through a secured REST API and a live dashboard.
-It runs as six Docker containers and is covered by about 400 automated tests.**
+**This pipeline receives live US stock trades from Finnhub and stores them in PostgreSQL.
+It caches live prices in Redis and builds one-minute candles.
+It supplies a REST API and a live dashboard.
+A Celery worker sends price alert emails through Resend.
+The system runs as seven Docker containers.**
 
 [![CI](https://github.com/siarkonyar/elt-dbt-phyton-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/siarkonyar/elt-dbt-phyton-data-pipeline/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
@@ -12,8 +14,9 @@ It runs as six Docker containers and is covered by about 400 automated tests.**
 ![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.37-FF4B4B?logo=streamlit&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker_Compose-6_services-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-~400-success?logo=pytest&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker_Compose-7_services-2496ED?logo=docker&logoColor=white)
+![Celery](https://img.shields.io/badge/Celery-5.6-37814A?logo=celery&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-467_collected-blue?logo=pytest&logoColor=white)
 ![Ruff](https://img.shields.io/badge/lint-ruff-D7FF64?logo=ruff&logoColor=black)
 
 <br/>
@@ -53,6 +56,7 @@ It runs as six Docker containers and is covered by about 400 automated tests.**
 | 🔐 **Serve** | A **FastAPI** service with JWT login, user roles and price alerts. |
 | 📊 **Show** | A **Streamlit** dashboard: live price cards, candlestick charts, price alerts and a pipeline health page. |
 | 🔔 **Alert** | Users set "tell me when NVDA goes above $X". The stream checks every incoming trade against every open alert. |
+| ✉️ **Notify** | The stream queues an email task for each triggered alert. A Celery worker sends the email through Resend. |
 
 > **Why "ELT" and not "ETL"?** Data is **E**xtracted and **L**oaded raw first. The **T**ransform step runs
 > later, inside the warehouse, on data that is already stored. If the transform has a bug, you fix it and
@@ -62,28 +66,35 @@ It runs as six Docker containers and is covered by about 400 automated tests.**
 
 ## 🏗 Architecture
 
-Six containers on one Docker network. **PostgreSQL is the source of truth.** Redis is only a fast copy
-that can be rebuilt from Postgres at any time.
+Seven containers use one Docker network. **PostgreSQL is the source of truth for stored data.**
+Redis database `0` holds the price cache. Redis database `1` holds the Celery queue.
+The stream can rebuild the price cache from PostgreSQL. It cannot rebuild lost email tasks.
 
 ```mermaid
 flowchart LR
     FH["🌐 <b>Finnhub</b><br/>WebSocket + REST"]
     USER(["👤 Browser"])
+    EMAIL["✉️ Resend<br/>Email API"]
 
     subgraph compose["🐳 Docker Compose · elt_network"]
         direction LR
         ST["⚡ <b>stream</b><br/>websocket-client<br/>threads + queue"]
-        RD[("🟥 <b>Redis 7</b><br/>live price cache")]
+        RD[("🟥 <b>Redis 7</b><br/>price cache + task queue")]
         PG[("🐘 <b>PostgreSQL 13</b><br/>source of truth")]
         RU["🕯️ <b>rollup</b><br/>pandas"]
         API["🔐 <b>api</b><br/>FastAPI + JWT"]
         DASH["📊 <b>dashboard</b><br/>Streamlit + Plotly"]
+        WORKER["✉️ <b>worker</b><br/>Celery"]
     end
 
     FH -- "live trades" --> ST
     FH -. "market open?" .-> ST
     ST -- "insert batch every 1 s" --> PG
     ST -- "price:SYMBOL hashes" --> RD
+    ST -- "email tasks: alert IDs" --> RD
+    RD -- "Celery queue" --> WORKER
+    WORKER -- "read alert + record attempt" --> PG
+    WORKER -- "send email" --> EMAIL
     PG -- "last 10 min of trades" --> RU
     RU -- "upsert 1-min candles" --> PG
     RD -- "live board, every 1 s" --> DASH
@@ -96,8 +107,8 @@ flowchart LR
     classDef ext fill:#E0F2FE,stroke:#0284C7,color:#0C4A6E
     classDef svc fill:#EEF2FF,stroke:#4F46E5,color:#1E1B4B
     classDef store fill:#FEF3C7,stroke:#D97706,color:#78350F
-    class FH,USER ext
-    class ST,RU,API,DASH svc
+    class FH,USER,EMAIL ext
+    class ST,RU,API,DASH,WORKER svc
     class RD,PG store
 ```
 
@@ -108,7 +119,8 @@ flowchart LR
 | `api` | web service | FastAPI on Uvicorn | `8000` |
 | `dashboard` | web app | Streamlit | `8501` |
 | `destination_postgres` | database | PostgreSQL 13 with a named volume | `5434` |
-| `redis` | cache | Redis 7, no persistence, localhost only | `6379` |
+| `redis` | cache and task broker | Redis 7, no persistence, localhost only | `6379` |
+| `worker` | task worker | Celery alert emails through Resend | – |
 
 ---
 
@@ -118,11 +130,12 @@ Every tool below is used for a specific job. The last column says why I picked i
 
 | Layer | Technology | What it does here | Why this choice |
 |---|---|---|---|
-| **Language** | ![Python](https://img.shields.io/badge/-Python_3.11-3776AB?logo=python&logoColor=white) | All four services, the tests, and CI helper scripts | One language end to end. Rich data and web libraries. |
+| **Language** | ![Python](https://img.shields.io/badge/-Python_3.11-3776AB?logo=python&logoColor=white) | All five Python services, the tests, and CI helper scripts | One language end to end. Rich data and web libraries. |
 | **Data source** | ![Finnhub](https://img.shields.io/badge/-Finnhub_API-1DB954) | WebSocket for live trades, REST for market open/closed status | Free real-time US equity trades over a WebSocket |
 | **Streaming** | ![websocket-client](https://img.shields.io/badge/-websocket--client-555) `threading` `queue` | A socket thread receives trades; the main thread writes them | The socket never waits on the database, so a slow write can't drop trades |
 | **Database** | ![PostgreSQL](https://img.shields.io/badge/-PostgreSQL_13-4169E1?logo=postgresql&logoColor=white) | Raw trades, candles, users, alerts, run logs | ACID transactions, `ON CONFLICT` upserts, exact `NUMERIC` prices, `DISTINCT ON` |
 | **Cache** | ![Redis](https://img.shields.io/badge/-Redis_7-DC382D?logo=redis&logoColor=white) | One hash per symbol holding the live price and day stats | Reads in under a millisecond, so the board can refresh every second |
+| **Notifications** | Celery 5.6 + Redis + Resend | Queues alert IDs, sends emails, and records attempts | A separate worker handles email requests and retries |
 | **DB access** | ![SQLAlchemy](https://img.shields.io/badge/-SQLAlchemy_2.0-D71F00?logo=sqlalchemy&logoColor=white) + psycopg2 | Connection pooling, transactions, parameterised SQL | Plain SQL I can read and tune, with safe parameter binding (no SQL injection) |
 | **Transform** | ![pandas](https://img.shields.io/badge/-pandas_2.2-150458?logo=pandas&logoColor=white) | Groups trades into OHLCV candles | A pure function that is very easy to unit test |
 | **API** | ![FastAPI](https://img.shields.io/badge/-FastAPI-009688?logo=fastapi&logoColor=white) ![Pydantic](https://img.shields.io/badge/-Pydantic_v2-E92063?logo=pydantic&logoColor=white) ![Uvicorn](https://img.shields.io/badge/-Uvicorn-499848) | REST endpoints, request validation, auto-generated OpenAPI docs | Type-checked input, dependency injection that is easy to swap in tests |
@@ -131,7 +144,7 @@ Every tool below is used for a specific job. The last column says why I picked i
 | **Containers** | ![Docker](https://img.shields.io/badge/-Docker_Compose-2496ED?logo=docker&logoColor=white) | One image per service, health checks, start-up order | The whole system starts with one command |
 | **Testing** | ![pytest](https://img.shields.io/badge/-pytest-0A9EDC?logo=pytest&logoColor=white) ![Testcontainers](https://img.shields.io/badge/-Testcontainers-291A3F) ![aiohttp](https://img.shields.io/badge/-aiohttp-2C5BB4?logo=aiohttp&logoColor=white) | Unit, integration and end-to-end tests; a fake Finnhub server | Tests the real containers, wired the same way as production |
 | **Quality** | ![Ruff](https://img.shields.io/badge/-Ruff-D7FF64?logo=ruff&logoColor=black) ![coverage](https://img.shields.io/badge/-pytest--cov-555) | Linting, import sorting, coverage per service | Fast, and one tool replaces several |
-| **CI** | ![GitHub Actions](https://img.shields.io/badge/-GitHub_Actions-2088FF?logo=githubactions&logoColor=white) | Lint → 4 parallel test lanes → end-to-end | A reusable workflow, real Postgres and Redis service containers |
+| **CI** | ![GitHub Actions](https://img.shields.io/badge/-GitHub_Actions-2088FF?logo=githubactions&logoColor=white) | Lint → 5 parallel test lanes → end-to-end | A reusable workflow, real Postgres and Redis service containers |
 
 ---
 
@@ -154,6 +167,7 @@ sequenceDiagram
     ST->>PG: INSERT INTO raw_trades (within 1 s)
     ST->>RD: HSET price:NVDA price 104.0 day_high ...
     ST->>PG: any price alert crossed? mark it fired
+    ST->>RD: queue tasks.send_alert_email(alert_id)
     DB->>RD: HGETALL price:* (every 1 s)
     RD-->>DB: live price and day stats → price card
     RU->>PG: read the last 10 minutes of trades (every 60 s)
@@ -208,6 +222,7 @@ sequenceDiagram
         F-->>F: log it, skip Redis, try again next second
     end
     F->>P: read pending alerts · mark crossed ones as fired
+    F->>R: queue one email task per triggered alert
 ```
 
 **Staying connected.** When the socket drops, the stream records why, waits, and reconnects. The wait
@@ -230,10 +245,11 @@ stateDiagram-v2
 Every connection is logged in `stream_sessions` with a heartbeat on each flush. This lets the dashboard
 tell **"the market is quiet"** apart from **"the socket is dead"**.
 
-### 🟥 Redis: the live price cache
+### 🟥 Redis: the live price cache and task broker
 
 Each symbol gets one Redis **hash**. Postgres is still the source of truth. This is a fast copy for the
-dashboard, which reads it every second.
+dashboard, which reads it every second. The price cache uses database `0`.
+Celery uses database `1` on the same Redis server.
 
 ```text
 redis> HGETALL price:NVDA
@@ -261,7 +277,7 @@ flowchart TD
 
 | Design rule | Why |
 |---|---|
-| **No persistence** (`--save '' --appendonly no`) | Everything can be rebuilt from Postgres. A restart simply starts empty. |
+| **No persistence** (`--save '' --appendonly no`) | A restart clears the price cache and the task queue. The stream can rebuild prices, but queued emails can be lost. |
 | **0.5 s timeout** on every call | A slow Redis gives up in time and doesn't stall the 1-second flush |
 | **One pipeline** per read or write | All five symbols in **one** network round trip |
 | **Rebuild after any failure** | If a write fails, the next flush rebuilds day stats from Postgres instead of trusting a hash that may be behind |
@@ -331,6 +347,27 @@ sequenceDiagram
 - All SQL uses **bound parameters**. No string concatenation.
 - No default admin password. The admin account is only created if you set **both** email and password.
 
+### ✉️ `worker`: Celery alert emails
+
+The stream marks an alert as triggered in PostgreSQL before it queues `tasks.send_alert_email`.
+Each task contains only the `alert_id`. The worker reads the current alert and the owner's email from PostgreSQL.
+It skips an alert if the alert is missing or has not triggered.
+
+The worker sends the email through Resend. It then records the result in `notification_history`.
+Each row contains the alert ID, status, message ID or error, and attempt time.
+The worker creates this table at startup.
+
+| Result | Worker action |
+|---|---|
+| Resend accepts the email | Records `sent` and the Resend message ID |
+| `RESEND_API_KEY` is empty | Records `failed` and stops without a retry |
+| `ApplicationError`, `RateLimitError`, or `RuntimeError` | Records `failed` and schedules a retry |
+| Other email error | Records `failed` and stops without a retry |
+
+The worker permits five retries after the first attempt. The retry delays are **30, 60, 120, 240, and 480 seconds**.
+A `sent` status means that Resend accepted the request. It does not confirm delivery to the recipient.
+The sender is currently fixed at `onboarding@resend.dev` in `worker/emails.py`.
+
 ### 📊 `dashboard`: Streamlit
 
 | Page | What you see | Refresh |
@@ -386,6 +423,14 @@ erDiagram
         timestamptz triggered_at "null until fired"
         numeric triggered_price
     }
+    notification_history {
+        bigserial notification_id PK
+        bigint alert_id "alert reference; no foreign key"
+        text status "sent or failed"
+        text message_id
+        text error
+        timestamptz attempted_at
+    }
     stream_sessions {
         bigserial session_id PK
         timestamptz connected_at
@@ -416,7 +461,7 @@ These are the choices I would talk about in an interview.
 | **Idempotent writes** | Candle upserts and the Redis merge rules (max/min/keep-first) give the same result if they run twice. A crash and a re-run never double-count. |
 | **Failure isolation** | Redis down? The board falls back to Postgres. Market-status API down? The stream keeps streaming. An alert check fails? Trades are still saved. One broken part never stops the others. |
 | **One source of truth** | Postgres owns the data. Redis is updated **only after** a successful insert, and is rebuilt from Postgres whenever it might be wrong. |
-| **Fail fast on bad config** | Every service validates its settings at start-up and exits with a clear message. The rollup even refuses a window shorter than its interval, because minutes would be silently skipped. |
+| **Configuration checks** | The API requires a JWT secret. The rollup rejects a window shorter than its interval. The worker records missing email credentials as a failed attempt. |
 | **Pure core, thin shell** | Candle building, alert matching, Redis merging, backoff and message parsing are pure functions with no database and no clock. That's why they're easy to unit test. |
 | **Immutable data** | `Trade`, `ExponentialBackoff`, configs and users are `frozen` dataclasses. Functions return new values instead of changing old ones. |
 | **Observable by design** | `stream_sessions` and `rollup_runs` record every connection and run, so the Pipeline page can show the health of each stage without reading container logs. |
@@ -426,23 +471,28 @@ These are the choices I would talk about in an interview.
 
 ## 🧪 Testing
 
-About **400 tests** across three tiers. Each tier tests something the tier below can't.
+Pytest collects **467 tests** across three levels. These counts include parametrized cases.
 
 ```mermaid
 pie showData
     title Tests by tier
-    "Unit · pure logic, no I/O" : 299
-    "Integration · real Postgres + Redis" : 80
+    "Unit · isolated dependencies" : 362
+    "Integration · real Postgres + Redis" : 86
     "End-to-end · real containers" : 19
 ```
 
 | Service | Unit | Integration | What's covered |
 |---|---:|---:|---|
-| `api` | 121 | 38 | routes, auth, tokens, passwords, validation, SQL queries |
-| `stream` | 98 | 28 | parsing, buffering, backoff, alerts, Redis merge and round trip, day-stats SQL |
-| `dashboard` | 49 | 3 | status rules, API client, Redis reader, candle SQL |
+| `api` | 144 | 38 | routes, auth, tokens, passwords, validation, SQL queries |
+| `stream` | 103 | 28 | parsing, buffering, backoff, alerts, task publication, Redis operations, day-stats SQL |
+| `dashboard` | 60 | 3 | status rules, API client, Redis reader, candle SQL |
 | `rollup` | 31 | 11 | candle maths, config validation, upsert idempotency |
+| `worker` | 24 | 6 | email requests, retries, task handling, database access, notification history |
 | **e2e** | | **19** | the whole system, wired as in production |
+
+Worker unit tests replace Resend with test doubles. Worker integration tests use PostgreSQL.
+The end-to-end stack includes the worker and sets `RESEND_API_KEY` to an empty string.
+The current end-to-end tests do not check email delivery or notification history.
 
 **How the end-to-end test works.** It starts the **real Docker images** with Testcontainers. The real
 Finnhub is swapped for a small fake WebSocket server written in `aiohttp`, which sends a known burst of trades.
@@ -470,9 +520,8 @@ Some test design choices:
 
 ## 🚦 CI/CD pipeline
 
-GitHub Actions runs on every push to `main`. After linting, the pipeline splits into **one lane per
-container**. Each lane is the same reusable workflow (`service-tests.yml`). End-to-end runs only when all
-four lanes pass.
+GitHub Actions runs on every push to `main`. After linting, the pipeline starts **five test lanes**.
+Each Python service uses the same workflow (`service-tests.yml`). End-to-end tests run only after all five lanes pass.
 
 ```mermaid
 flowchart LR
@@ -482,14 +531,15 @@ flowchart LR
     LINT --> DU["dashboard<br/>unit"] --> DI["dashboard<br/>integration"]
     LINT --> RU["rollup<br/>unit"] --> RI["rollup<br/>integration"]
     LINT --> SU["stream<br/>unit"] --> SI["stream<br/>integration"]
+    LINT --> WU["worker<br/>unit"] --> WI["worker<br/>integration"]
 
-    AI & DI & RI & SI --> E2E["🐳 e2e<br/>full compose stack"]
+    AI & DI & RI & SI & WI --> E2E["🐳 e2e<br/>full compose stack"]
 
     classDef unit fill:#DCFCE7,stroke:#16A34A,color:#14532D
     classDef integ fill:#FEF9C3,stroke:#CA8A04,color:#713F12
     classDef e2e fill:#FCE7F3,stroke:#DB2777,color:#831843
-    class AU,DU,RU,SU unit
-    class AI,DI,RI,SI integ
+    class AU,DU,RU,SU,WU unit
+    class AI,DI,RI,SI,WI integ
     class E2E e2e
 ```
 
@@ -522,6 +572,23 @@ Then start everything:
 
 ```bash
 docker compose up --build
+```
+
+To enable alert emails, set `RESEND_API_KEY` in `.env` before startup.
+Use a recipient that Resend permits for the configured sender.
+If the key is empty, alerts still trigger. The worker records each email attempt as `failed` without a retry.
+
+To inspect the worker, run:
+
+```bash
+docker compose logs -f worker
+```
+
+To inspect recent email attempts, run:
+
+```bash
+docker compose exec destination_postgres psql -U postgres -d destination_db \
+  -c 'SELECT * FROM notification_history ORDER BY attempted_at DESC LIMIT 20;'
 ```
 
 | Open | URL |
@@ -559,7 +626,7 @@ ruff check .
 
 ## ⚙️ Configuration
 
-All settings come from environment variables (`.env`). Each service checks them at start-up.
+Compose reads settings from `.env` and passes them to the services as environment variables.
 
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
@@ -568,6 +635,8 @@ All settings come from environment variables (`.env`). Each service checks them 
 | `JWT_SECRET` | **required**, ≥ 32 chars | api | Signs login tokens |
 | `STOCK_SYMBOLS` | `AMZN,NVDA,GOOGL,TSLA,NFLX` | stream | Symbols to subscribe to |
 | `REDIS_URL` | `redis://redis:6379/0` | stream, dashboard | Live price cache |
+| `CELERY_BROKER_URL` | `redis://redis:6379/1` | stream, worker | Task broker; use the same URL in both services |
+| `RESEND_API_KEY` | blank | worker | Enables email requests; an empty key produces a recorded failure |
 | `FLUSH_INTERVAL_SECONDS` | `1` | stream | How often the queue is written |
 | `FLUSH_MAX_ROWS` | `500` | stream | Max trades per flush |
 | `RECONNECT_MIN_SECONDS` / `MAX` | `1` / `60` | stream | Reconnect backoff range |
@@ -606,6 +675,10 @@ elt/
 │   ├── views/               │  markets.py · alerts.py · pipeline.py
 │   ├── live_prices.py       │  Redis reader with Postgres fallback
 │   └── data.py · queries.py · status.py · auth.py · ui.py
+├── worker/                  ✉️ Celery: alert email tasks
+│   ├── tasks.py             │  Celery app, schema setup, task, retries
+│   ├── emails.py            │  Resend request and error classification
+│   └── db.py · schema.sql · Dockerfile · requirements.txt
 ├── tests/
 │   ├── unit/<service>/          🟢 pure logic
 │   ├── integration/<service>/   🟡 real Postgres + Redis
@@ -622,6 +695,9 @@ elt/
 
 Honest notes on where this would need work at a larger scale:
 
+- **Email tasks are not durable.** Redis has no persistence. A Redis restart can remove queued tasks.
+- **Alert updates and task publication use separate operations.** A broker error can leave a triggered alert without an email task. There is no automatic recovery for this case.
+- **Email delivery has no duplicate protection.** Repeated tasks can send repeated emails. Use a database outbox and an idempotency mechanism before requiring reliable delivery.
 - **Candle maths runs in pandas.** That's fine for five symbols and a 10-minute window. At hundreds of symbols the aggregation should move into a SQL `GROUP BY` inside Postgres.
 - **The dashboard's symbol list is a constant** that has to match `STOCK_SYMBOLS` in the stream. A shared config would remove that manual step.
 - **Redis has no password or TLS.** That's fine because it's bound to localhost. A cloud deployment would need both, or a managed Redis.

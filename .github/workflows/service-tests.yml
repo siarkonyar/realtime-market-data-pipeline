@@ -19,6 +19,9 @@ jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
+    # The default is 6 hours. A normal run takes 2-3 minutes, so a hang
+    # is caught quickly.
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +75,9 @@ jobs:
     name: integration
     runs-on: ubuntu-latest
     needs: unit
+    # Talks to Postgres and Redis, so a stuck connection is the likeliest
+    # hang in the whole pipeline. Same limit as unit.
+    timeout-minutes: 10
 
     services:
       postgres:

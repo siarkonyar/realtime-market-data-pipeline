@@ -70,6 +70,22 @@ jobs:
           reports/${{ inputs.service }}-unit-junit.xml "${{ inputs.service }} unit"
           >> "$GITHUB_STEP_SUMMARY"
 
+      # The VM is deleted when the job ends, and the files with it. This keeps
+      # the JUnit XML and a line-by-line coverage page for 7 days, to download
+      # from the bottom of the run page.
+      - name: Coverage HTML
+        if: always()
+        run: coverage html -d reports/htmlcov || echo "no coverage data"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.service }}-unit-reports
+          path: reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Waits only for this container's unit job, not for the other lanes.
   integration:
     name: integration
@@ -177,3 +193,19 @@ jobs:
           reports/${{ inputs.service }}-integration-junit.xml
           "${{ inputs.service }} integration"
           >> "$GITHUB_STEP_SUMMARY"
+
+      # The VM is deleted when the job ends, and the files with it. This keeps
+      # the JUnit XML and a line-by-line coverage page for 7 days, to download
+      # from the bottom of the run page.
+      - name: Coverage HTML
+        if: always()
+        run: coverage html -d reports/htmlcov || echo "no coverage data"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.service }}-integration-reports
+          path: reports/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -38,6 +38,20 @@ DIAGNOSTIC_TABLES = (
 )
 DIAGNOSTIC_SERVICES = ("fake_websocket", "stream", "rollup", "api")
 
+# Every service in the stack. Their logs are saved here before teardown, one
+# file per service, so CI can upload them when e2e fails.
+LOGGED_SERVICES = (
+    "destination_postgres",
+    "redis",
+    "fake_websocket",
+    "stream",
+    "rollup",
+    "api",
+    "dashboard",
+    "worker",
+)
+LOG_DIR = ROOT / "reports" / "e2e-logs"
+
 NEWEST_CANDLE_SQL = text(
     "SELECT * FROM candles WHERE symbol = :symbol ORDER BY minute DESC LIMIT 1"
 )
@@ -77,6 +91,9 @@ def compose():
     `with` matters — it guarantees `docker compose down` even when a test
     fails or you hit Ctrl-C. testcontainers removes the volumes too, so
     the next run starts from an empty database.
+
+    The logs are written to LOG_DIR in `finally`, before `with` tears the
+    stack down: after `docker compose down` they are gone.
     """
     stack = DockerCompose(
         context=ROOT,
@@ -84,7 +101,23 @@ def compose():
         build=True,
     )
     with stack:
-        yield stack
+        try:
+            yield stack
+        finally:
+            _save_service_logs(stack)
+
+
+def _save_service_logs(compose):
+    """One file per service. Never raises: a failure here must not hide the
+    test's own result."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for service in LOGGED_SERVICES:
+        try:
+            stdout, stderr = compose.get_logs(service)
+            text_out = stdout + (f"\n----- stderr -----\n{stderr}" if stderr else "")
+        except Exception as error:  # noqa: BLE001 - see docstring
+            text_out = f"could not read logs: {type(error).__name__}"
+        (LOG_DIR / f"{service}.log").write_text(text_out, encoding="utf-8")
 
 
 @pytest.fixture(scope="session")

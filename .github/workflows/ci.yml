@@ -1,12 +1,19 @@
 name: CI
 
+# A pull request into main is tested before it merges. The merge is then
+# tested again on main, because main may have moved since the PR's last run.
+# Pushes to feature branches start nothing on their own.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
+# A new push to a PR cancels that PR's older run: only its newest commit
+# matters. Main is never cancelled, so every merge commit gets a result.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read

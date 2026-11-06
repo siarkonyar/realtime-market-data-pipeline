@@ -9,7 +9,7 @@ on:
   pull_request:
     branches: [main]
 
-# A new push to a PR cancels that PR's older run: only its newest commit
+# a new push to a PR cancels that PR's older run: only its newest commit
 # matters. Main is never cancelled, so every merge commit gets a result.
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,8 +17,8 @@ concurrency:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
+  checks: write #EnricoMi/publish-unit-test-result-action needs this permision
+  pull-requests: write #EnricoMi/publish-unit-test-result-action uses this to write the test results as PR comment
 
 env:
   PYTHON_VERSION: '3.11'
@@ -29,13 +29,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4 #this workflow copies our repo
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5  #this workflow installs phyton
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache: pip #caches downloaded packages with file hash key
+          cache-dependency-path: requirements-dev.txt # when this file changes the cache resets
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
@@ -87,7 +87,7 @@ jobs:
     name: e2e
     runs-on: ubuntu-latest
     needs: [api, dashboard, rollup, stream, worker]
-    timeout-minutes: 20
+    timeout-minutes: 20 #cancels the task after 20 minutes
 
     steps:
       - uses: actions/checkout@v4
@@ -104,12 +104,12 @@ jobs:
       - name: Generate a .env for compose
         run: echo "POSTGRES_PASSWORD=e2e" > .env
 
-      - name: Run tests
+      - name: Run tests #junit creates the test reports for EnricoMi display them
         run: >-
           pytest -m e2e -v -rA --durations=10
           --junitxml=reports/e2e-junit.xml
 
-      - name: Publish test results
+      - name: Publish test results # runs every time because of if: always()
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
         with:
@@ -137,12 +137,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # The one check that branch protection requires. A job whose `needs` failed
-  # is skipped, and GitHub counts a skipped required check as passing, so
-  # requiring only e2e would let a PR with a failed ruff merge. This job runs
-  # always() and fails unless every job above succeeded, so a new job only has
-  # to be added to its `needs` list, never to the GitHub settings.
-  ci-ok:
+  ci-ok: #this job is for branch protection rule
+        # if e2e is skipped it still could merge because it skipped not failed
     name: ci-ok
     runs-on: ubuntu-latest
     needs: [lint, api, dashboard, rollup, stream, worker, e2e]

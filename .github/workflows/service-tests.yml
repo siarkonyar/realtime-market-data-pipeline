@@ -104,7 +104,7 @@ jobs:
           POSTGRES_DB: test_db
         ports:
           - 5432:5432
-        options: >-
+        options: >- #the steps does not continue until these healtchecks are done
           --health-cmd "pg_isready -U postgres -d test_db"
           --health-interval 5s
           --health-timeout 3s

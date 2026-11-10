@@ -49,6 +49,8 @@ env/
 .coverage.*
 htmlcov/
 coverage.xml
+# JUnit XML, coverage HTML and e2e service logs
+reports/
 
 
 # ─────────────────────────────────────────────

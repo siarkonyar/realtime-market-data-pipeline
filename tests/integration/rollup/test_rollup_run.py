@@ -13,6 +13,23 @@ INSERT_TRADE_SQL = text(
     """
 )
 
+CANDLES_SQL = text(
+    """
+    SELECT symbol, minute AS at, open, high, low, close
+      FROM candles
+     WHERE minute >= now() - make_interval(hours => :hours)
+     ORDER BY symbol, minute
+    """
+)
+
+ROLLUP_RUNS_SQL = text(
+    """
+    SELECT run_id, trades_read, minutes_written, status, error_message
+      FROM rollup_runs
+     ORDER BY run_id DESC
+    """
+)
+
 def base_minute():
     now = datetime.now(UTC)
     return now.replace(second=0, microsecond=0) - timedelta(minutes=MINUTES_BACK)
@@ -43,13 +60,13 @@ def one_busy_minute(minute):
         ("AMZN", minute + timedelta(seconds=15), 200.0, 5.0),
     ]
 
-def read_candles(engine, queries):
+def read_candles(engine):
     return pd.read_sql(
-        queries.CANDLES_SQL, engine, params={"hours": HISTORY_HOURS}
+        CANDLES_SQL, engine, params={"hours": HISTORY_HOURS}
     )
 
-def test_a_trade_becomes_a_candle_the_dashboard_can_find(
-    e2e_db, rollup_main, rollup_config, dashboard_queries
+def test_a_trade_becomes_a_candle(
+    e2e_db, rollup_main, rollup_config
 ):
     insert_trades(e2e_db, one_busy_minute(base_minute()))
 
@@ -57,7 +74,7 @@ def test_a_trade_becomes_a_candle_the_dashboard_can_find(
 
     assert written == 2
 
-    candles = read_candles(e2e_db, dashboard_queries)
+    candles = read_candles(e2e_db)
     assert list(candles["symbol"]) == ["AMZN", "NVDA"]
 
     nvda = candles[candles["symbol"] == "NVDA"].iloc[0]
@@ -66,14 +83,14 @@ def test_a_trade_becomes_a_candle_the_dashboard_can_find(
     assert float(nvda["low"]) == 95.0
     assert float(nvda["close"]) == 104.0
 
-def test_the_run_is_recorded_for_the_dashboard(
-    e2e_db, rollup_main, rollup_config, dashboard_queries
+def test_the_run_is_recorded(
+    e2e_db, rollup_main, rollup_config
 ):
     insert_trades(e2e_db, one_busy_minute(base_minute()))
 
     rollup_main.run_once(rollup_config.load_config({}), e2e_db)
 
-    runs = pd.read_sql(dashboard_queries.ROLLUP_RUNS_SQL, e2e_db)
+    runs = pd.read_sql(ROLLUP_RUNS_SQL, e2e_db)
 
     assert len(runs) == 1
     run = runs.iloc[0]
@@ -83,7 +100,7 @@ def test_the_run_is_recorded_for_the_dashboard(
     assert pd.isna(run["error_message"])
 
 def test_a_late_trade_corrects_its_candle_instead_of_duplicating(
-    e2e_db, rollup_main, rollup_config, dashboard_queries
+    e2e_db, rollup_main, rollup_config
 ):
     config = rollup_config.load_config({})
     minute = base_minute()
@@ -96,11 +113,11 @@ def test_a_late_trade_corrects_its_candle_instead_of_duplicating(
     insert_trades(e2e_db, [("NVDA", minute + timedelta(seconds=50), 130.0, 2.0)])
     rollup_main.run_once(config, e2e_db)
 
-    candles = read_candles(e2e_db, dashboard_queries)
+    candles = read_candles(e2e_db)
 
     assert len(candles) == 1               # corrected, not duplicated
     assert float(candles.iloc[0]["close"]) == 130.0
     assert float(candles.iloc[0]["high"]) == 130.0
 
-    runs = pd.read_sql(dashboard_queries.ROLLUP_RUNS_SQL, e2e_db)
+    runs = pd.read_sql(ROLLUP_RUNS_SQL, e2e_db)
     assert len(runs) == 2

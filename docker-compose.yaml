@@ -86,26 +86,6 @@ services:
       destination_postgres:
         condition: service_healthy
 
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - '8501:8501'
-    env_file:
-      - ./.env
-    environment:
-      DESTINATION_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    networks:
-      - elt_network
-    depends_on:
-      destination_postgres:
-        condition: service_healthy
-      # The dashboard's first login would otherwise race the api's startup.
-      api:
-        condition: service_started
-
   worker:
     build:
       context: ./worker

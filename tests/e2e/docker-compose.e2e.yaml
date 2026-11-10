@@ -66,10 +66,6 @@ services:
     ports: !override
       - '8000'
 
-  dashboard:
-    ports: !override
-      - '8501'
-
   worker:
     environment:
       DESTINATION_POSTGRES_PASSWORD: e2e

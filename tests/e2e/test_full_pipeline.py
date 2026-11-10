@@ -12,8 +12,6 @@ ALL_TRADES = 5                             # plus the single AMZN one
 EXPECTED_OHLC = (100.0, 108.0, 95.0, 104.0)
 
 CANDLE_WINDOW_HOURS = 1
-DASHBOARD_HEALTH_PATH = "/_stcore/health"
-DASHBOARD_TIMEOUT_SECONDS = 10
 
 OTHER_CANDLES_SQL = text("SELECT count(*) FROM candles WHERE symbol = :symbol")
 STREAM_TRADES_SQL = text("SELECT sum(trades_received) FROM stream_sessions")
@@ -89,34 +87,6 @@ def test_second_symbol_also_produces_a_candle(nvda_candle, e2e_engine):
         ).scalar()
 
     assert count == 1
-
-def test_dashboard_query_returns_the_candle(
-    nvda_candle, e2e_engine, dashboard_queries
-):
-    """Runs the dashboard's own SQL against the data the pipeline produced."""
-    with e2e_engine.connect() as connection:
-        rows = connection.execute(
-            dashboard_queries.CANDLES_SQL, {"hours": CANDLE_WINDOW_HOURS}
-        ).all()
-
-    assert any(row.symbol == SYMBOL for row in rows)
-
-
-def test_dashboard_image_answers_health_check(nvda_candle, compose):
-    """Proves the image starts and stays up. It does NOT prove the chart
-    drew — Streamlit renders over its own websocket, so plain HTTP can
-    never see it. Depends on nvda_candle only for the delay: by then
-    Streamlit has certainly finished starting.
-    """
-    host = compose.get_service_host("dashboard", 8501)
-    port = compose.get_service_port("dashboard", 8501)
-
-    response = requests.get(
-        f"http://{host}:{port}{DASHBOARD_HEALTH_PATH}",
-        timeout=DASHBOARD_TIMEOUT_SECONDS,
-    )
-
-    assert response.status_code == 200
 
 def test_api_image_answers_health_check(nvda_candle, api_url):
     response = requests.get(api_url("/health"), timeout=API_TIMEOUT_SECONDS,)

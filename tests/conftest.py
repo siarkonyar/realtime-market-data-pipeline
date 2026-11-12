@@ -107,14 +107,20 @@ def connection(engine):
 
 
 @pytest.fixture
-def redis_client():
+def redis_url():
+    """CI sets TEST_REDIS_URL, locally it is the compose Redis."""
+    return os.environ.get("TEST_REDIS_URL", LOCAL_TEST_REDIS_URL)
+
+
+@pytest.fixture
+def redis_client(redis_url):
     """A real Redis, emptied before and after every test.
 
     The Redis twin of `connection`: CI sets TEST_REDIS_URL, locally it is the
     compose Redis. Skips the test if neither answers.
     """
     client = redis.Redis.from_url(
-        os.environ.get("TEST_REDIS_URL", LOCAL_TEST_REDIS_URL),
+        redis_url,
         socket_connect_timeout=1,
         decode_responses=True,
     )
@@ -293,6 +299,24 @@ def api_auth():
     config needs emails before it."""
     return _load_with_bare_siblings("api", "auth", ("emails", "config", "tokens"))
 
+@pytest.fixture(scope="session")
+def api_live_hub():
+    """Pure asyncio, nothing of its own to import."""
+    return _load_service_module("api", "live_hub")
+
+@pytest.fixture(scope="session")
+def api_live_auth():
+    """live_auth.py does `from auth import ...` and `from tokens import ...`,
+    so auth and everything auth needs go in first."""
+    return _load_with_bare_siblings(
+        "api", "live_auth", ("emails", "config", "tokens", "auth")
+    )
+
+@pytest.fixture(scope="session")
+def api_live_feed():
+    """Imports redis and nothing of its own, so no siblings are needed."""
+    return _load_service_module("api", "live_feed")
+
 @pytest.fixture
 def api_tables(connection, api_db):
     """A connection with the api service's tables already created.
@@ -316,6 +340,9 @@ API_BARE_MODULES = (
     "tokens",
     "db",
     "auth",
+    "live_hub",
+    "live_auth",
+    "live_feed",
 )
 
 

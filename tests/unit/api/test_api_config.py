@@ -130,3 +130,17 @@ def test_the_config_cannot_be_mutated_after_it_is_built(api_config):
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         config.jwt_secret = "something-else-entirely"
+
+
+def test_the_redis_url_defaults_to_the_compose_redis(api_config):
+    config = api_config.load_config({"JWT_SECRET": SECRET})
+
+    assert config.redis_url == "redis://redis:6379/0"
+
+
+def test_the_redis_url_is_read_from_the_environment(api_config):
+    config = api_config.load_config(
+        {"JWT_SECRET": SECRET, "REDIS_URL": "redis://localhost:6379/15"}
+    )
+
+    assert config.redis_url == "redis://localhost:6379/15"

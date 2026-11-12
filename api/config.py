@@ -5,6 +5,8 @@ from emails import is_email
 
 DEFAULTS = {
     "JWT_EXPIRY_SECONDS": "3600",
+    # The compose Redis, the same default the stream uses.
+    "REDIS_URL": "redis://redis:6379/0",
 }
 
 # HS256 signatures are only as strong as the key behind them, and a short key
@@ -26,6 +28,7 @@ class ApiConfig:
     token_expiry_seconds: int
     admin_email: str | None
     admin_password: str | None
+    redis_url: str
 
 
 def _read_number(env, name, parse):
@@ -113,4 +116,5 @@ def load_config(env=None):
         token_expiry_seconds=expiry,
         admin_email=admin_email,
         admin_password=admin_password,
+        redis_url=env.get("REDIS_URL") or DEFAULTS["REDIS_URL"],
     )

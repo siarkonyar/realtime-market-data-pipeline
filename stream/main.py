@@ -209,7 +209,13 @@ def flush_loop(
 
         trades = drain(trades_queue, config.flush_max_rows)
         stored = load_live_prices(redis_client, engine, trades, needs_reseed)
-        candles = load_live_candles(redis_client, engine, trades, needs_reseed)
+        # A failed price load means Redis is down or hanging. Asking it again
+        # for the candles could cost a second timeout in the same flush.
+        candles = (
+            None
+            if stored is None
+            else load_live_candles(redis_client, engine, trades, needs_reseed)
+        )
 
         if time.monotonic() >= next_status_at:
             status = safe_market_status(config, http) or status

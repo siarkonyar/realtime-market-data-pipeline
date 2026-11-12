@@ -144,3 +144,33 @@ def test_the_redis_url_is_read_from_the_environment(api_config):
     )
 
     assert config.redis_url == "redis://localhost:6379/15"
+
+
+# --- symbols: the same rules as stream/config.py's parse_symbols ---
+
+def test_the_default_symbols_match_the_stream(api_config):
+    config = api_config.load_config({"JWT_SECRET": SECRET})
+
+    assert config.symbols == ("AMZN", "NVDA", "GOOGL", "TSLA", "NFLX")
+
+
+def test_symbols_are_read_from_the_environment(api_config):
+    config = api_config.load_config(
+        {"JWT_SECRET": SECRET, "STOCK_SYMBOLS": "TSLA,AMZN"}
+    )
+
+    assert config.symbols == ("TSLA", "AMZN")
+
+
+def test_symbols_are_cleaned_like_the_stream_cleans_them(api_config):
+    """Upper-cased, trimmed, blanks dropped, duplicates dropped, order kept."""
+    config = api_config.load_config(
+        {"JWT_SECRET": SECRET, "STOCK_SYMBOLS": "nvda, AMZN,, NVDA "}
+    )
+
+    assert config.symbols == ("NVDA", "AMZN")
+
+
+def test_a_symbol_list_with_nothing_usable_in_it_is_rejected(api_config):
+    with pytest.raises(api_config.ConfigError):
+        api_config.load_config({"JWT_SECRET": SECRET, "STOCK_SYMBOLS": " , , "})

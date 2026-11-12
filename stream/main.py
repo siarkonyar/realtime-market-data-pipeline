@@ -8,7 +8,19 @@ from alerts import find_triggered
 from backoff import ExponentialBackoff
 from buffer import drain
 from config import ConfigError, load_config
-from db import apply_schema, get_engine, read_day_stats, read_pending_alerts
+from db import (
+    apply_schema,
+    get_engine,
+    read_day_stats,
+    read_minute_candles,
+    read_pending_alerts,
+)
+from live_candles import (
+    merge_candle,
+    minute_of,
+    read_live_candles,
+    write_live_candles,
+)
 from live_prices import connect, merge, read_live_prices, write_live_prices
 from market_status import build_session, fetch_market_status
 from notify import connect_broker, queue_alert_emails
@@ -118,6 +130,62 @@ def save_live_prices(client, stored, trades):
         return False
 
 
+def load_live_candles(client, engine, trades, reseed):
+    """Each batch symbol's stored candle, seeded from Postgres wherever Redis
+    has nothing for that symbol's earliest minute in the batch. Runs before
+    the insert, so a seed never already holds this batch. None means this
+    flush skips the candles."""
+    if not trades:
+        return {}
+
+    symbols = sorted({trade.symbol for trade in trades})
+    first_minute = {
+        symbol: minute_of(min(t.trade_ts for t in trades if t.symbol == symbol))
+        for symbol in symbols
+    }
+
+    try:
+        stored = {} if reseed else read_live_candles(client, symbols)
+        stale = {
+            symbol: minute
+            for symbol, minute in first_minute.items()
+            if stored.get(symbol, {}).get("minute") != minute
+        }
+        if not stale:
+            return stored
+
+        with engine.begin() as connection:
+            seeded = read_minute_candles(connection, stale)
+        return {**stored, **seeded}
+    except Exception as error:
+        print(
+            f"live candles not loaded: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def save_live_candles(client, stored, trades):
+    """True once Redis holds and has published this batch's candles. Called
+    only after the insert worked, like save_live_prices."""
+    symbols = {trade.symbol for trade in trades}
+
+    try:
+        write_live_candles(client, {
+            symbol: merge_candle(
+                stored[symbol], [t for t in trades if t.symbol == symbol]
+            )
+            for symbol in symbols
+        })
+        return True
+    except Exception as error:
+        print(
+            f"live candles not saved: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def flush_loop(
         config,
         engine,
@@ -141,6 +209,7 @@ def flush_loop(
 
         trades = drain(trades_queue, config.flush_max_rows)
         stored = load_live_prices(redis_client, engine, trades, needs_reseed)
+        candles = load_live_candles(redis_client, engine, trades, needs_reseed)
 
         if time.monotonic() >= next_status_at:
             status = safe_market_status(config, http) or status
@@ -167,9 +236,13 @@ def flush_loop(
         else:
             # An empty flush changes nothing, so it must not clear the flag.
             if trades:
-                needs_reseed = stored is None or not save_live_prices(
+                prices_saved = stored is not None and save_live_prices(
                     redis_client, stored, trades
                 )
+                candles_saved = candles is not None and save_live_candles(
+                    redis_client, candles, trades
+                )
+                needs_reseed = not (prices_saved and candles_saved)
 
         fired = check_alerts(engine, trades)
 

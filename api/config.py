@@ -7,6 +7,8 @@ DEFAULTS = {
     "JWT_EXPIRY_SECONDS": "3600",
     # The compose Redis, the same default the stream uses.
     "REDIS_URL": "redis://redis:6379/0",
+    # The stream's default too: the api lists exactly what the stream follows.
+    "STOCK_SYMBOLS": "AMZN,NVDA,GOOGL,TSLA,NFLX",
 }
 
 # HS256 signatures are only as strong as the key behind them, and a short key
@@ -22,6 +24,21 @@ class ConfigError(RuntimeError):
     """Raised when a setting is missing, unparseable, or out of range."""
 
 
+def parse_symbols(raw):
+    """"amzn, NVDA,, NVDA " -> ("AMZN", "NVDA")
+
+    A copy of stream/config.py's rules. The services share no code, and the
+    two must agree, or React asks for candles the stream never wrote.
+    """
+    cleaned = [piece.strip().upper() for piece in raw.split(",")]
+    symbols = tuple(dict.fromkeys(piece for piece in cleaned if piece))
+
+    if not symbols:
+        raise ConfigError(f"STOCK_SYMBOLS has no usable symbols in it: {raw!r}")
+
+    return symbols
+
+
 @dataclass(frozen=True)
 class ApiConfig:
     jwt_secret: str
@@ -29,6 +46,7 @@ class ApiConfig:
     admin_email: str | None
     admin_password: str | None
     redis_url: str
+    symbols: tuple
 
 
 def _read_number(env, name, parse):
@@ -117,4 +135,5 @@ def load_config(env=None):
         admin_email=admin_email,
         admin_password=admin_password,
         redis_url=env.get("REDIS_URL") or DEFAULTS["REDIS_URL"],
+        symbols=parse_symbols(env.get("STOCK_SYMBOLS") or DEFAULTS["STOCK_SYMBOLS"]),
     )

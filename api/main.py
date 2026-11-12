@@ -126,6 +126,15 @@ def candles(
     return [candle_to_dict(row) for row in reader(symbol.upper(), hours)]
 
 
+@app.get("/symbols")
+def symbols(
+    config=Depends(get_config),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """STOCK_SYMBOLS, the list the stream follows, in its order."""
+    return list(config.symbols)
+
+
 # ------------------------------------------------------------ live candles
 
 # How long a new WebSocket has to send {"token": "..."} before it is closed.

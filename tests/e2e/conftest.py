@@ -48,6 +48,7 @@ LOGGED_SERVICES = (
     "rollup",
     "api",
     "worker",
+    "frontend",
 )
 LOG_DIR = ROOT / "reports" / "e2e-logs"
 

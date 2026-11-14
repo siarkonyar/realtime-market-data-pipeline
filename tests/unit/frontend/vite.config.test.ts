@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { devProxy } from './vite.config'
+import { devProxy } from '../../../frontend/vite.config.ts'
 
 // `npm run dev` must send requests to the api the same way nginx does in
 // the container, or code that works in one place breaks in the other.

@@ -1,4 +1,4 @@
-// Runs before every test file (see test.setupFiles in vite.config.ts).
+// Runs before every test file (see test.setupFiles in frontend/vite.config.ts).
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach } from 'vitest'

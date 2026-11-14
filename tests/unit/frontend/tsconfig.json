@@ -1,0 +1,15 @@
+{
+  // Same rules as the app code these tests check.
+  "extends": "../../../frontend/tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "../../../frontend/node_modules/.tmp/tsconfig.tests.tsbuildinfo",
+    "types": [],
+    // Packages are installed in frontend/node_modules, which is not above this
+    // folder, so tell TypeScript where to look. @types first, or it finds
+    // React's plain JavaScript files and stops there with no types.
+    "paths": {
+      "*": ["../../../frontend/node_modules/@types/*", "../../../frontend/node_modules/*"]
+    }
+  },
+  "include": ["."]
+}

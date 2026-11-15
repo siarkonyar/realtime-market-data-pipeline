@@ -74,6 +74,16 @@ export async function login(email: string, password: string): Promise<LoginResul
   return { token: body.access_token, role: body.role }
 }
 
+// A new account always gets the "user" role. The answer holds no token, so
+// the caller signs in afterwards.
+export async function register(email: string, password: string): Promise<void> {
+  await request('/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+}
+
 export async function fetchSymbols(
   token: string,
   signal: AbortSignal,

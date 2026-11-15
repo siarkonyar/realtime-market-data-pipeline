@@ -33,6 +33,27 @@ DAY_STATS_SQL = text(
     """
 )
 
+# Seeds a live candle in Redis. unnest turns the two lists into rows of
+# (symbol, minute_start), so one query serves every symbol, each at its own
+# minute. Ranges on trade_ts again, for the (symbol, trade_ts) index.
+MINUTE_CANDLES_SQL = text(
+    """
+    SELECT wanted.symbol,
+           (array_agg(t.price ORDER BY t.trade_ts))[1]      AS open,
+           max(t.price)                                     AS high,
+           min(t.price)                                     AS low,
+           (array_agg(t.price ORDER BY t.trade_ts DESC))[1] AS close,
+           coalesce(sum(t.volume), 0)                       AS volume
+      FROM unnest(CAST(:symbols AS text[]), CAST(:minutes AS timestamptz[]))
+               AS wanted(symbol, minute_start)
+      JOIN raw_trades AS t
+        ON t.symbol = wanted.symbol
+       AND t.trade_ts >= wanted.minute_start
+       AND t.trade_ts <  wanted.minute_start + interval '1 minute'
+     GROUP BY wanted.symbol
+    """
+)
+
 
 def get_engine(env=None):
     env = os.environ if env is None else env
@@ -81,6 +102,29 @@ def read_day_stats(connection, symbols, day):
             "day_high": float(row["day_high"]),
             "day_low": float(row["day_low"]),
             "trades_today": row["trades_today"],
+        }
+        for row in rows
+    }
+    return {symbol: found.get(symbol, {}) for symbol in symbols}
+
+
+def read_minute_candles(connection, minute_by_symbol):
+    """symbol -> its candle for the minute asked, {} for a symbol with no
+    trades in that minute. Each symbol may ask for a different minute."""
+    symbols = list(minute_by_symbol)
+    rows = connection.execute(
+        MINUTE_CANDLES_SQL,
+        {"symbols": symbols, "minutes": [minute_by_symbol[s] for s in symbols]},
+    ).mappings()
+
+    found = {
+        row["symbol"]: {
+            "minute": minute_by_symbol[row["symbol"]],
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
         }
         for row in rows
     }

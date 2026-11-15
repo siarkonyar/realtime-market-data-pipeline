@@ -47,8 +47,8 @@ LOGGED_SERVICES = (
     "stream",
     "rollup",
     "api",
-    "dashboard",
     "worker",
+    "frontend",
 )
 LOG_DIR = ROOT / "reports" / "e2e-logs"
 

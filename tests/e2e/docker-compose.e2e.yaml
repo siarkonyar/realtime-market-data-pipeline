@@ -66,13 +66,14 @@ services:
     ports: !override
       - '8000'
 
-  dashboard:
-    ports: !override
-      - '8501'
-
   worker:
     environment:
       DESTINATION_POSTGRES_PASSWORD: e2e
       # Beats the real key a developer's .env may hold, so a test alert never
       # sends a real email. With no key the task records a failure and stops.
       RESEND_API_KEY: ''
+
+  frontend:
+    # Same reason as above: the dev stack already holds 3000 on the host.
+    ports: !override
+      - '80'

@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       service:
-        description: Container folder to test - api, dashboard, rollup or stream
+        description: Container folder to test - api, rollup or stream
         required: true
         type: string
 

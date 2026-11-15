@@ -1,11 +1,22 @@
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+import redis
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel, Field, StringConstraints
+from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy.exc import SQLAlchemyError
 
 import db
@@ -18,6 +29,9 @@ from auth import (
 )
 from config import ConfigError
 from emails import EMAIL_PATTERN, MAX_EMAIL_LENGTH
+from live_auth import user_from_auth_message
+from live_feed import read_snapshot, run_relay
+from live_hub import STOP, CandleHub
 from passwords import hash_password, verify_password
 from serialize import alert_to_dict, candle_to_dict
 from tokens import create_token
@@ -63,7 +77,26 @@ async def lifespan(app):
     except SQLAlchemyError as error:
         print(f"could not prepare the database at startup: {error}", file=sys.stderr)
 
-    yield
+    # One Redis subscription for the whole process, after the checks above so
+    # a missing JWT_SECRET never gets this far. It retries on its own while
+    # Redis is down, so it never holds up the rest of the api.
+    relay = asyncio.create_task(run_relay(_relay_client, get_hub()))
+    relay.add_done_callback(_report_relay_end)
+
+    try:
+        yield
+    finally:
+        relay.cancel()
+        # wait, not await relay: a relay that crashed has been reported by
+        # _report_relay_end already and must not crash the shutdown too.
+        await asyncio.wait({relay})
+
+
+def _report_relay_end(task):
+    """run_relay only ever ends by being cancelled at shutdown. Any other end
+    means live candles have stopped while the rest of the api keeps going."""
+    if not task.cancelled() and task.exception() is not None:
+        print(f"candle relay stopped: {task.exception()!r}", file=sys.stderr)
 
 
 app = FastAPI(title="ELT candles API", lifespan=lifespan)
@@ -91,6 +124,161 @@ def candles(
     user: AuthenticatedUser=Depends(get_current_user)
 ):
     return [candle_to_dict(row) for row in reader(symbol.upper(), hours)]
+
+
+@app.get("/symbols")
+def symbols(
+    config=Depends(get_config),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """STOCK_SYMBOLS, the list the stream follows, in its order."""
+    return list(config.symbols)
+
+
+# ------------------------------------------------------------ live candles
+
+# How long a new WebSocket has to send {"token": "..."} before it is closed.
+AUTH_TIMEOUT_SECONDS = 5.0
+
+# The snapshot read gives up quickly, so a hung Redis closes the socket with
+# an error instead of leaving the browser waiting.
+REDIS_TIMEOUT_SECONDS = 0.5
+
+# The relay's connection is quiet for hours after the market closes. A ping
+# this often notices a Redis that went away without saying goodbye.
+HEALTH_CHECK_SECONDS = 30
+
+
+@lru_cache(maxsize=1)
+def get_hub():
+    """One hub per api process, shared by the relay and every WebSocket."""
+    return CandleHub()
+
+
+@lru_cache(maxsize=1)
+def _snapshot_client():
+    return AsyncRedis.from_url(
+        get_config().redis_url,
+        decode_responses=True,
+        socket_timeout=REDIS_TIMEOUT_SECONDS,
+        socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+    )
+
+
+def _relay_client():
+    """A new client for every attempt: run_relay closes the old one when it
+    drops. No socket_timeout, because a quiet channel is not a broken one."""
+    return AsyncRedis.from_url(
+        get_config().redis_url,
+        decode_responses=True,
+        socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+        health_check_interval=HEALTH_CHECK_SECONDS,
+    )
+
+
+async def read_live_snapshot(symbol):
+    return await read_snapshot(_snapshot_client(), symbol)
+
+
+def get_snapshot_reader():
+    return read_live_snapshot
+
+
+async def _authenticate(websocket, config):
+    """The user the first message proves it is, or None if it fails or is late."""
+    try:
+        text = await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return None
+
+    return user_from_auth_message(config.jwt_secret, text)
+
+
+async def _send_snapshot(websocket, symbol, snapshot_reader):
+    """False when Redis could not be read; the socket is closed by then."""
+    try:
+        snapshot = await snapshot_reader(symbol)
+    except redis.RedisError as error:
+        print(
+            f"live snapshot for {symbol} failed: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return False
+
+    if snapshot is not None:
+        await websocket.send_text(snapshot)
+    return True
+
+
+async def _forward(websocket, mailbox):
+    """Mailbox to browser until the hub says STOP: this reader is too slow, or
+    Redis dropped. Either way React reconnects for a fresh snapshot."""
+    while (letter := await mailbox.get()) is not STOP:
+        await websocket.send_text(letter)
+
+    await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+
+
+async def _wait_for_disconnect(websocket):
+    """Nothing is expected from the browser after the token, but reading is the
+    only way to hear that it left."""
+    while (await websocket.receive())["type"] != "websocket.disconnect":
+        pass
+
+
+async def _forward_until_closed(websocket, mailbox):
+    """Whichever ends first, the forwarding or the browser, ends the other."""
+    tasks = {
+        asyncio.create_task(_forward(websocket, mailbox)),
+        asyncio.create_task(_wait_for_disconnect(websocket)),
+    }
+
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Also when this endpoint is itself cancelled: no task outlives it.
+        for task in tasks:
+            task.cancel()
+        # wait, not gather(return_exceptions=True): gather can turn a cancel of
+        # this endpoint into a normal return, and the cancel is lost.
+        await asyncio.wait(tasks)
+
+    for task in done:
+        task.result()  # re-raises if it failed, so the error is not lost
+
+
+async def _stream_candles(websocket, hub, symbol, snapshot_reader):
+    # Join before reading the snapshot: a candle published during the read
+    # waits in the mailbox instead of being lost.
+    mailbox = hub.join(symbol)
+
+    try:
+        if await _send_snapshot(websocket, symbol, snapshot_reader):
+            await _forward_until_closed(websocket, mailbox)
+    finally:
+        hub.leave(symbol, mailbox)
+
+
+@app.websocket("/ws/candles")
+async def live_candles(
+    websocket: WebSocket,
+    symbol: str = Query(..., min_length=1, max_length=10),
+    config=Depends(get_config),
+    hub=Depends(get_hub),
+    snapshot_reader=Depends(get_snapshot_reader),
+):
+    await websocket.accept()
+
+    try:
+        if await _authenticate(websocket, config) is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        await _stream_candles(websocket, hub, symbol.upper(), snapshot_reader)
+    except WebSocketDisconnect:
+        # The browser left. The hub was already left in _stream_candles.
+        return
 
 
 def read_user(email):

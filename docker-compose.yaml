@@ -85,26 +85,8 @@ services:
     depends_on:
       destination_postgres:
         condition: service_healthy
-
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - '8501:8501'
-    env_file:
-      - ./.env
-    environment:
-      DESTINATION_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    networks:
-      - elt_network
-    depends_on:
-      destination_postgres:
+      redis:
         condition: service_healthy
-      # The dashboard's first login would otherwise race the api's startup.
-      api:
-        condition: service_started
 
   worker:
     build:
@@ -122,6 +104,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      # The one address the browser uses: http://localhost:3000. The api keeps
+      # its own 8000 for Swagger, curl and the e2e tests.
+      - '3000:80'
+    networks:
+      - elt_network
+    depends_on:
+      # nginx looks up the name "api" when it starts and stops if it cannot.
+      api:
+        condition: service_started
 
 volumes:
   destination_data:

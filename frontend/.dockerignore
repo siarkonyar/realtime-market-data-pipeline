@@ -1,0 +1,6 @@
+# Kept out of the build context. The image installs its own packages with
+# `npm ci` and builds its own dist/, so these copies would only slow the build
+# and could be made for macOS instead of Linux.
+node_modules
+dist
+*.local

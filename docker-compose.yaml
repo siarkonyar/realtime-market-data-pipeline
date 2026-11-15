@@ -105,6 +105,22 @@ services:
       redis:
         condition: service_healthy
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      # The one address the browser uses: http://localhost:3000. The api keeps
+      # its own 8000 for Swagger, curl and the e2e tests.
+      - '3000:80'
+    networks:
+      - elt_network
+    depends_on:
+      # nginx looks up the name "api" when it starts and stops if it cannot.
+      api:
+        condition: service_started
+
 volumes:
   destination_data:
 

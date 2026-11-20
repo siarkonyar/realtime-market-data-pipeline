@@ -1,7 +1,10 @@
 """WS /ws/candles?symbol=NVDA - the live candle, end to end inside the api.
 
 The order on every connection:
-  1. accept, then wait for {"token": "..."} as the first message
+  1. accept, then check the session cookie the browser sent with the handshake
+     (a bad one is closed with 1008 AFTER accepting: a refused handshake
+     reaches the browser as a bare 1006, and React could not tell "sign in
+     again" from "network blip")
   2. join the hub (the mailbox starts collecting from here)
   3. read the snapshot from Redis and send it, if there is one
   4. send whatever reaches the mailbox, until either side goes away
@@ -68,11 +71,13 @@ def make_client(api_main, api_config, api_live_hub, **snapshot_options):
     return TestClient(api_main.app), hub, snapshots
 
 
-def auth_message(api_tokens, secret=SECRET):
+def session_cookie(api_tokens, secret=SECRET):
+    """The Cookie header the browser sends with the handshake, as it does on
+    every request to the site once login has stored the cookie."""
     token = api_tokens.create_token(
         secret, "ada@example.com", "user", datetime.now(UTC), EXPIRES_IN
     )
-    return {"token": token}
+    return {"Cookie": f"session={token}"}
 
 
 def closed_with(websocket):
@@ -84,36 +89,49 @@ def closed_with(websocket):
 
 # --- getting in ---
 
-def test_a_wrong_token_closes_the_socket(api_main, api_config, api_live_hub):
+BAD_COOKIE = {"Cookie": "session=not-a-token"}
+
+
+def test_a_wrong_cookie_closes_the_socket(api_main, api_config, api_live_hub):
     client, _, _ = make_client(api_main, api_config, api_live_hub)
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json({"token": "not-a-token"})
-
+    with client.websocket_connect(PATH, headers=BAD_COOKIE) as websocket:
         assert closed_with(websocket) == status.WS_1008_POLICY_VIOLATION
 
 
-def test_a_wrong_token_never_reaches_redis_or_the_hub(
+def test_a_wrong_cookie_never_reaches_redis_or_the_hub(
     api_main, api_config, api_live_hub
 ):
     client, hub, snapshots = make_client(api_main, api_config, api_live_hub)
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json({"token": "not-a-token"})
+    with client.websocket_connect(PATH, headers=BAD_COOKIE) as websocket:
         closed_with(websocket)
 
     assert snapshots.symbols_read == []
     assert hub.listener_count("NVDA") == 0
 
 
-def test_no_token_in_time_closes_the_socket(
-    api_main, api_config, api_live_hub, monkeypatch
-):
-    monkeypatch.setattr(api_main, "AUTH_TIMEOUT_SECONDS", 0.05)
+def test_no_cookie_closes_the_socket(api_main, api_config, api_live_hub):
     client, _, _ = make_client(api_main, api_config, api_live_hub)
 
     with client.websocket_connect(PATH) as websocket:
         assert closed_with(websocket) == status.WS_1008_POLICY_VIOLATION
+
+
+def test_a_token_in_the_first_message_is_no_longer_a_way_in(
+    api_main, api_config, api_live_hub, api_tokens
+):
+    """The old way: no cookie, the token sent as a message. Cookie only now,
+    so it is closed like any socket without a cookie."""
+    client, _, snapshots = make_client(api_main, api_config, api_live_hub)
+    token = session_cookie(api_tokens)["Cookie"].removeprefix("session=")
+
+    with client.websocket_connect(PATH) as websocket:
+        websocket.send_json({"token": token})
+
+        assert closed_with(websocket) == status.WS_1008_POLICY_VIOLATION
+
+    assert snapshots.symbols_read == []
 
 
 def test_a_missing_symbol_is_refused(api_main, api_config, api_live_hub):
@@ -149,9 +167,9 @@ def test_the_snapshot_comes_before_an_update_published_during_the_read(
         api_main, api_config, api_live_hub, updates=(UPDATE,)
     )
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json(auth_message(api_tokens))
-
+    with client.websocket_connect(
+        PATH, headers=session_cookie(api_tokens)
+    ) as websocket:
         assert websocket.receive_text() == SNAPSHOT
         assert websocket.receive_text() == UPDATE
 
@@ -163,17 +181,18 @@ def test_no_snapshot_means_the_first_message_is_an_update(
         api_main, api_config, api_live_hub, snapshot=None, updates=(UPDATE,)
     )
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json(auth_message(api_tokens))
-
+    with client.websocket_connect(
+        PATH, headers=session_cookie(api_tokens)
+    ) as websocket:
         assert websocket.receive_text() == UPDATE
 
 
 def test_the_symbol_is_upper_cased(api_main, api_config, api_live_hub, api_tokens):
     client, _, snapshots = make_client(api_main, api_config, api_live_hub)
 
-    with client.websocket_connect("/ws/candles?symbol=nvda") as websocket:
-        websocket.send_json(auth_message(api_tokens))
+    with client.websocket_connect(
+        "/ws/candles?symbol=nvda", headers=session_cookie(api_tokens)
+    ) as websocket:
         websocket.receive_text()
 
     assert snapshots.symbols_read == ["NVDA"]
@@ -188,8 +207,9 @@ def test_a_reader_that_closes_leaves_the_hub(
     trade, which after hours can be many hours away."""
     client, hub, _ = make_client(api_main, api_config, api_live_hub)
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json(auth_message(api_tokens))
+    with client.websocket_connect(
+        PATH, headers=session_cookie(api_tokens)
+    ) as websocket:
         websocket.receive_text()
 
     assert hub.listener_count("NVDA") == 0
@@ -205,9 +225,9 @@ def test_a_full_mailbox_closes_the_socket_to_try_again(
         api_main, api_config, api_live_hub, updates=too_many
     )
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json(auth_message(api_tokens))
-
+    with client.websocket_connect(
+        PATH, headers=session_cookie(api_tokens)
+    ) as websocket:
         assert websocket.receive_text() == SNAPSHOT
         assert closed_with(websocket) == status.WS_1013_TRY_AGAIN_LATER
 
@@ -224,9 +244,9 @@ def test_redis_down_during_the_snapshot_closes_with_a_server_error(
         error=redis.ConnectionError("Connection refused"),
     )
 
-    with client.websocket_connect(PATH) as websocket:
-        websocket.send_json(auth_message(api_tokens))
-
+    with client.websocket_connect(
+        PATH, headers=session_cookie(api_tokens)
+    ) as websocket:
         assert closed_with(websocket) == status.WS_1011_INTERNAL_ERROR
 
     assert hub.listener_count("NVDA") == 0

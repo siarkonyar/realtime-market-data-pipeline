@@ -1,53 +1,59 @@
-"""parse_bearer, the pure half of api/auth.py.
+"""user_from_token, the pure half of api/auth.py.
 
-Only the string parsing is tested here. get_current_user and require_admin are
-FastAPI dependencies, and testing them in isolation would prove they work when
-called the way this file calls them - not the way FastAPI does. They get real
-coverage in Step 8, through requests that carry real tokens.
-
-Pulling the parsing out into a plain function is what makes these eight cases
-one line each instead of eight clients, tokens and config overrides.
+The session cookie holds a JWT. Both doors into the api check it with this one
+function: get_current_user for HTTP requests, and /ws/candles when a socket
+opens. The FastAPI side is tested through real requests in test_api_routes.py
+and test_api_live_route.py.
 """
-TOKEN = "abc123"
+from datetime import UTC, datetime, timedelta
+
+SECRET = "a-test-secret-that-is-long-enough-to-pass"
+OTHER_SECRET = "a-different-secret-that-is-also-long-enough"
+EXPIRES_IN = 3600
 
 
-def test_a_bearer_header_yields_the_token(api_auth):
-    assert api_auth.parse_bearer(f"Bearer {TOKEN}") == TOKEN
+def token(api_tokens, secret=SECRET, now=None, role="user"):
+    return api_tokens.create_token(
+        secret, "ada@example.com", role, now or datetime.now(UTC), EXPIRES_IN
+    )
 
 
-def test_the_scheme_is_matched_whatever_its_case(api_auth):
-    """RFC 7235 says the scheme is case-insensitive, and real clients disagree
-    about how to spell it. Rejecting "bearer" would break them for no reason."""
-    assert api_auth.parse_bearer(f"bearer {TOKEN}") == TOKEN
-    assert api_auth.parse_bearer(f"BEARER {TOKEN}") == TOKEN
+def test_the_cookie_is_called_session(api_auth):
+    """React never reads it, but nginx logs, the e2e tests and anyone opening
+    the browser's dev tools see this name."""
+    assert api_auth.SESSION_COOKIE == "session"
 
 
-def test_a_header_without_the_bearer_prefix_is_rejected(api_auth):
-    """Basic auth sends base64 credentials, not a token. Decoding it as one
-    would at best fail confusingly and at worst leak the header into a log."""
-    assert api_auth.parse_bearer(f"Basic {TOKEN}") is None
+def test_a_valid_token_gives_its_user(api_auth, api_tokens):
+    user = api_auth.user_from_token(SECRET, token(api_tokens, role="admin"))
+
+    assert user == api_auth.AuthenticatedUser(email="ada@example.com", role="admin")
 
 
-def test_a_bare_token_with_no_scheme_is_rejected(api_auth):
-    assert api_auth.parse_bearer(TOKEN) is None
+def test_a_missing_cookie_gives_no_user(api_auth):
+    """None is what FastAPI passes when the browser sent no session cookie,
+    so it has to be an ordinary input here, not a crash."""
+    assert api_auth.user_from_token(SECRET, None) is None
 
 
-def test_a_header_with_more_than_two_parts_is_rejected(api_auth):
-    """Splitting on whitespace and taking [1] would quietly accept this and
-    hand back a token that is not the whole token."""
-    assert api_auth.parse_bearer(f"Bearer {TOKEN} extra") is None
+def test_an_empty_cookie_gives_no_user(api_auth):
+    """What a browser may still send for a moment after sign-out."""
+    assert api_auth.user_from_token(SECRET, "") is None
 
 
-def test_an_empty_header_is_rejected(api_auth):
-    assert api_auth.parse_bearer("") is None
+def test_a_cookie_that_is_not_a_token_gives_no_user(api_auth):
+    assert api_auth.user_from_token(SECRET, "not-a-token") is None
 
 
-def test_a_missing_header_is_rejected(api_auth):
-    """None is what FastAPI passes when the client sent no Authorization
-    header at all, so it has to be an ordinary input here, not a crash."""
-    assert api_auth.parse_bearer(None) is None
+def test_a_token_signed_with_another_secret_gives_no_user(api_auth, api_tokens):
+    forged = token(api_tokens, secret=OTHER_SECRET)
+
+    assert api_auth.user_from_token(SECRET, forged) is None
 
 
-def test_a_bearer_prefix_with_no_token_is_rejected(api_auth):
-    assert api_auth.parse_bearer("Bearer") is None
-    assert api_auth.parse_bearer("Bearer ") is None
+def test_an_expired_token_gives_no_user(api_auth, api_tokens):
+    two_hours_ago = datetime.now(UTC) - timedelta(hours=2)
+
+    expired = token(api_tokens, now=two_hours_ago)
+
+    assert api_auth.user_from_token(SECRET, expired) is None

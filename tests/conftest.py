@@ -305,14 +305,6 @@ def api_live_hub():
     return _load_service_module("api", "live_hub")
 
 @pytest.fixture(scope="session")
-def api_live_auth():
-    """live_auth.py does `from auth import ...` and `from tokens import ...`,
-    so auth and everything auth needs go in first."""
-    return _load_with_bare_siblings(
-        "api", "live_auth", ("emails", "config", "tokens", "auth")
-    )
-
-@pytest.fixture(scope="session")
 def api_live_feed():
     """Imports redis and nothing of its own, so no siblings are needed."""
     return _load_service_module("api", "live_feed")
@@ -341,7 +333,6 @@ API_BARE_MODULES = (
     "db",
     "auth",
     "live_hub",
-    "live_auth",
     "live_feed",
 )
 

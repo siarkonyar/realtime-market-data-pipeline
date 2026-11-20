@@ -11,6 +11,7 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -22,14 +23,15 @@ from sqlalchemy.exc import SQLAlchemyError
 import db
 from auth import (
     ADMIN_ROLE,
+    SESSION_COOKIE,
     AuthenticatedUser,
     get_config,
     get_current_user,
     require_admin,
+    user_from_token,
 )
 from config import ConfigError
 from emails import EMAIL_PATTERN, MAX_EMAIL_LENGTH
-from live_auth import user_from_auth_message
 from live_feed import read_snapshot, run_relay
 from live_hub import STOP, CandleHub
 from passwords import hash_password, verify_password
@@ -137,9 +139,6 @@ def symbols(
 
 # ------------------------------------------------------------ live candles
 
-# How long a new WebSocket has to send {"token": "..."} before it is closed.
-AUTH_TIMEOUT_SECONDS = 5.0
-
 # The snapshot read gives up quickly, so a hung Redis closes the socket with
 # an error instead of leaving the browser waiting.
 REDIS_TIMEOUT_SECONDS = 0.5
@@ -184,16 +183,6 @@ def get_snapshot_reader():
     return read_live_snapshot
 
 
-async def _authenticate(websocket, config):
-    """The user the first message proves it is, or None if it fails or is late."""
-    try:
-        text = await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SECONDS)
-    except TimeoutError:
-        return None
-
-    return user_from_auth_message(config.jwt_secret, text)
-
-
 async def _send_snapshot(websocket, symbol, snapshot_reader):
     """False when Redis could not be read; the socket is closed by then."""
     try:
@@ -221,8 +210,8 @@ async def _forward(websocket, mailbox):
 
 
 async def _wait_for_disconnect(websocket):
-    """Nothing is expected from the browser after the token, but reading is the
-    only way to hear that it left."""
+    """Nothing is expected from the browser after the handshake, but reading is
+    the only way to hear that it left."""
     while (await websocket.receive())["type"] != "websocket.disconnect":
         pass
 
@@ -268,10 +257,14 @@ async def live_candles(
     hub=Depends(get_hub),
     snapshot_reader=Depends(get_snapshot_reader),
 ):
+    # Accept first, then check: a handshake refused before accept reaches the
+    # browser as a bare 1006, and React could not tell "sign in again" from a
+    # network blip. 1008 after accept is a close code React can act on.
     await websocket.accept()
+    token = websocket.cookies.get(SESSION_COOKIE)
 
     try:
-        if await _authenticate(websocket, config) is None:
+        if user_from_token(config.jwt_secret, token) is None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
 
@@ -309,9 +302,25 @@ class RegisterRequest(BaseModel):
     email: Email
     password: str = Field(min_length=1, max_length=72)
 
+def _session_cookie_options(config):
+    """Shared by login and logout. A browser only replaces or deletes a cookie
+    whose name and path match, so the two must never drift apart."""
+    return {
+        "key": SESSION_COOKIE,
+        "path": "/",
+        # JavaScript cannot read it, so a script injected into the page
+        # cannot steal it.
+        "httponly": True,
+        # Never sent on a request started by another site: the CSRF defence.
+        "samesite": "strict",
+        "secure": config.cookie_secure,
+    }
+
+
 @app.post("/auth/login")
 def login(
     credentials: LoginRequest,
+    response: Response,
     reader=Depends(get_user_reader),
     config=Depends(get_config),
 ):
@@ -322,7 +331,6 @@ def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="wrong email or password",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
     token = create_token(
@@ -333,7 +341,29 @@ def login(
         config.token_expiry_seconds,
     )
 
-    return {"access_token": token, "token_type": "bearer", "role": user.role}
+    # The cookie lives exactly as long as the token inside it.
+    response.set_cookie(
+        value=token,
+        max_age=config.token_expiry_seconds,
+        **_session_cookie_options(config),
+    )
+
+    return {"email": email, "role": user.role}
+
+
+@app.get("/auth/me")
+def me(user: AuthenticatedUser = Depends(get_current_user)):
+    """Who the cookie belongs to. React cannot read an httpOnly cookie, so it
+    asks here once on page load."""
+    return {"email": user.email, "role": user.role}
+
+
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(response: Response, config=Depends(get_config)):
+    """No sign-in needed: a broken or expired cookie is exactly the one a user
+    wants gone. The token itself stays valid until it expires; only this
+    browser forgets it."""
+    response.delete_cookie(**_session_cookie_options(config))
 
 def create_user(email, hashed_password, role=NEW_USER_ROLE):
     with _engine().begin() as connection:
@@ -406,7 +436,6 @@ def add_alert(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="this account no longer exists",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
     return {

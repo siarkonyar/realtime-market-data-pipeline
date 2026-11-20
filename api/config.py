@@ -9,7 +9,12 @@ DEFAULTS = {
     "REDIS_URL": "redis://redis:6379/0",
     # The stream's default too: the api lists exactly what the stream follows.
     "STOCK_SYMBOLS": "AMZN,NVDA,GOOGL,TSLA,NFLX",
+    # Safe by default: a deploy that forgets the setting keeps the session
+    # cookie off plain http. Local http turns it off in .env.
+    "COOKIE_SECURE": "true",
 }
+
+FLAG_VALUES = {"true": True, "false": False}
 
 # HS256 signatures are only as strong as the key behind them, and a short key
 # is a guessable key. 32 is what `openssl rand -hex 32` produces.
@@ -47,6 +52,7 @@ class ApiConfig:
     admin_password: str | None
     redis_url: str
     symbols: tuple
+    cookie_secure: bool
 
 
 def _read_number(env, name, parse):
@@ -55,6 +61,18 @@ def _read_number(env, name, parse):
         return parse(raw)
     except (TypeError, ValueError) as error:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from error
+
+
+def _read_flag(env, name):
+    """Only true or false. "yes" or "0" could mean either to whoever wrote
+    it, so the api refuses to guess."""
+    raw = env.get(name) or DEFAULTS[name]
+    flag = FLAG_VALUES.get(raw.strip().lower())
+
+    if flag is None:
+        raise ConfigError(f"{name} must be true or false, got {raw!r}")
+
+    return flag
 
 
 def _read_secret(env):
@@ -136,4 +154,5 @@ def load_config(env=None):
         admin_password=admin_password,
         redis_url=env.get("REDIS_URL") or DEFAULTS["REDIS_URL"],
         symbols=parse_symbols(env.get("STOCK_SYMBOLS") or DEFAULTS["STOCK_SYMBOLS"]),
+        cookie_secure=_read_flag(env, "COOKIE_SECURE"),
     )

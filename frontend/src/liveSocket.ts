@@ -7,10 +7,10 @@ export interface LiveHandlers {
   readonly onStatus: (status: LiveStatus) => void
 }
 
-// The api closes with 1008 when the token is wrong or expired: retrying with
-// the same token cannot help. 1011 (Redis error), 1013 (too slow, or Redis
-// restarted) and a plain drop are worth another try.
-const CLOSE_BAD_TOKEN = 1008
+// The api closes with 1008 when the session cookie is missing, wrong or
+// expired: retrying with the same cookie cannot help. 1011 (Redis error), 1013
+// (too slow, or Redis restarted) and a plain drop are worth another try.
+const CLOSE_NOT_SIGNED_IN = 1008
 const CLOSE_NORMAL = 1000
 
 // 1s, 2s, 4s ... up to 30s, so a restarting api is not flooded.
@@ -42,12 +42,9 @@ function retryDelay(attempt: number): number {
 }
 
 // Keeps /ws/candles open for one symbol until the returned function is called.
-// The token goes in the first message, so it never shows up in a URL or a log.
-export function openLiveCandles(
-  symbol: string,
-  token: string,
-  handlers: LiveHandlers,
-): () => void {
+// The browser sends the session cookie with the handshake (it has Path=/), so
+// the token never shows up in a URL, a message, or this code.
+export function openLiveCandles(symbol: string, handlers: LiveHandlers): () => void {
   let socket: WebSocket | null = null
   let retryTimer: number | undefined
   let attempt = 0
@@ -64,7 +61,6 @@ export function openLiveCandles(
     socket = current
 
     current.addEventListener('open', () => {
-      current.send(JSON.stringify({ token }))
       handlers.onStatus('live')
     })
 
@@ -82,7 +78,7 @@ export function openLiveCandles(
       if (isStopped) {
         return
       }
-      if (event.code === CLOSE_BAD_TOKEN) {
+      if (event.code === CLOSE_NOT_SIGNED_IN) {
         handlers.onStatus('unauthorized')
         return
       }

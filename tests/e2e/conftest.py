@@ -6,6 +6,7 @@ socket, exactly the way it is reached in production.
 """
 
 import time
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,9 @@ USER_PASSWORD = "a-plain-password"
 # The api has to finish its lifespan - create the users table and seed the
 # admin - before the first login can possibly work.
 LOGIN_TIMEOUT_SECONDS = 60
+
+# The cookie login sets (SESSION_COOKIE in api/auth.py).
+SESSION_COOKIE = "session"
 
 
 @pytest.fixture(scope="session")
@@ -347,7 +351,19 @@ def _login(api_url, email, password):
         timeout=API_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
-    return response.json()["access_token"]
+
+    # Read from Set-Cookie by hand: requests keeps a Secure cookie in its jar
+    # but never sends it over plain http, and the e2e stack keeps the default
+    # COOKIE_SECURE=true on purpose.
+    morsel = SimpleCookie(response.headers.get("set-cookie", "")).get(SESSION_COOKIE)
+    if morsel is None:
+        pytest.fail(f"login answered {response.status_code} but set no session cookie")
+    return morsel.value
+
+
+def _session_cookie(token):
+    """The Cookie header a browser sends once login has stored the cookie."""
+    return {"Cookie": f"{SESSION_COOKIE}={token}"}
 
 
 @pytest.fixture(scope="session")
@@ -376,7 +392,7 @@ def admin_token(api_url):
 
 @pytest.fixture(scope="session")
 def admin_headers(admin_token):
-    return {"Authorization": f"Bearer {admin_token}"}
+    return _session_cookie(admin_token)
 
 
 @pytest.fixture(scope="session")
@@ -393,4 +409,4 @@ def user_headers(api_url, admin_token):
         timeout=API_TIMEOUT_SECONDS,
     )
 
-    return {"Authorization": f"Bearer {_login(api_url, USER_EMAIL, USER_PASSWORD)}"}
+    return _session_cookie(_login(api_url, USER_EMAIL, USER_PASSWORD))

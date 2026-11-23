@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from functools import lru_cache
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, status
 
 from config import load_config
 from tokens import TokenError, decode_token
 
-BEARER_SCHEME = "bearer"
+# The cookie login sets. httpOnly, so React never reads it: the browser sends
+# it with every request, and with the WebSocket handshake.
+SESSION_COOKIE = "session"
 ADMIN_ROLE = "admin"
 
 
@@ -16,23 +18,22 @@ class AuthenticatedUser: # could have been dict
     role: str
 
 
-def parse_bearer(header):
-    if not header:
+def user_from_token(secret, token):
+    """The user a session cookie proves it is, or None.
+
+    One check for both doors: get_current_user for HTTP, and /ws/candles when
+    a socket opens. None covers a missing, empty, forged or expired cookie.
+    """
+    if not token:
         return None
 
-    parts = header.split()
-
-    if len(parts) != 2:
-        return None
-    #Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZGEifQ.xK3p
-    #-- we split because the auth comes like this
-
-    scheme, token = parts
-
-    if scheme.lower() != BEARER_SCHEME:
+    try:
+        claims = decode_token(secret, token)
+    except TokenError:
         return None
 
-    return token or None
+    # decode_token requires sub and role, so neither lookup can KeyError here.
+    return AuthenticatedUser(email=claims["sub"], role=claims["role"])
 
 
 @lru_cache(maxsize=1)
@@ -40,30 +41,19 @@ def get_config():
     return load_config()
 
 
-def _unauthenticated():
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="not authenticated",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
 def get_current_user(
-    authorization: str | None = Header(default=None),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
     config=Depends(get_config),
 ):
-    token = parse_bearer(authorization)
+    user = user_from_token(config.jwt_secret, session)
 
-    if token is None:
-        raise _unauthenticated()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="not authenticated",
+        )
 
-    try:
-        claims = decode_token(config.jwt_secret, token)
-    except TokenError as error:
-        raise _unauthenticated() from error
-
-    # decode_token requires sub and role, so neither lookup can KeyError here.
-    return AuthenticatedUser(email=claims["sub"], role=claims["role"])
+    return user
 
 
 def require_admin(user=Depends(get_current_user)):

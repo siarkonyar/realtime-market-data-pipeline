@@ -1,4 +1,4 @@
-// Checks for data that comes from outside (the network, sessionStorage).
+// Checks for data that comes from outside (the network).
 // TypeScript types vanish at runtime, so these do the checking for real.
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

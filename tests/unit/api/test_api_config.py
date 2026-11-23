@@ -174,3 +174,38 @@ def test_symbols_are_cleaned_like_the_stream_cleans_them(api_config):
 def test_a_symbol_list_with_nothing_usable_in_it_is_rejected(api_config):
     with pytest.raises(api_config.ConfigError):
         api_config.load_config({"JWT_SECRET": SECRET, "STOCK_SYMBOLS": " , , "})
+
+
+# --- COOKIE_SECURE: whether the session cookie is sent over https only ---
+
+def test_the_session_cookie_is_https_only_by_default(api_config):
+    """Safe by default: a deploy that forgets the setting still keeps the
+    cookie off plain http."""
+    config = api_config.load_config({"JWT_SECRET": SECRET})
+
+    assert config.cookie_secure is True
+
+
+def test_cookie_secure_can_be_turned_off_for_local_http(api_config):
+    config = api_config.load_config({"JWT_SECRET": SECRET, "COOKIE_SECURE": "false"})
+
+    assert config.cookie_secure is False
+
+
+def test_cookie_secure_can_be_turned_on_explicitly(api_config):
+    config = api_config.load_config({"JWT_SECRET": SECRET, "COOKIE_SECURE": "true"})
+
+    assert config.cookie_secure is True
+
+
+def test_cookie_secure_is_read_whatever_its_case(api_config):
+    config = api_config.load_config({"JWT_SECRET": SECRET, "COOKIE_SECURE": " False "})
+
+    assert config.cookie_secure is False
+
+
+def test_a_cookie_secure_that_is_not_true_or_false_is_rejected(api_config):
+    """"yes" or "0" could mean either to whoever wrote it, so the api refuses
+    to guess and stops at startup instead."""
+    with pytest.raises(api_config.ConfigError):
+        api_config.load_config({"JWT_SECRET": SECRET, "COOKIE_SECURE": "yes"})

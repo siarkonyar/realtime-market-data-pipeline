@@ -1,6 +1,7 @@
 import base64
 import json
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from types import SimpleNamespace
 
 import pytest
@@ -170,23 +171,102 @@ def login(client, email="ada@example.com", password=PASSWORD):
     return client.post(LOGIN_PATH, json={"email": email, "password": password})
 
 
-def test_a_correct_password_returns_a_token(api_main, api_config, api_passwords):
+def set_cookie(response, name="session"):
+    """The cookie the response told the browser to store, with its labels
+    (httponly, samesite, max-age...), or None if it set no such cookie."""
+    cookie = SimpleCookie()
+    for header in response.headers.get_list("set-cookie"):
+        cookie.load(header)
+    return cookie.get(name)
+
+
+def test_a_correct_password_sets_the_session_cookie(
+    api_main, api_config, api_passwords
+):
     client = make_login_client(api_main, api_config, make_user(api_passwords))
 
     response = login(client)
 
     assert response.status_code == 200
-    assert response.json()["access_token"]
+    assert set_cookie(response).value
 
 
-def test_the_token_names_the_bearer_type(api_main, api_config, api_passwords):
-    """The client has to know what to put in the Authorization header, and
-    "bearer" is the word that goes in front of the token."""
+def test_the_login_answer_holds_no_token(api_main, api_config, api_passwords):
+    """The whole point of an httpOnly cookie is that page JavaScript never
+    sees the token. A token in the JSON as well would undo that."""
     client = make_login_client(api_main, api_config, make_user(api_passwords))
 
     response = login(client)
 
-    assert response.json()["token_type"] == "bearer"
+    assert response.json() == {"email": "ada@example.com", "role": "user"}
+
+
+def test_page_javascript_cannot_read_the_cookie(api_main, api_config, api_passwords):
+    client = make_login_client(api_main, api_config, make_user(api_passwords))
+
+    assert set_cookie(login(client))["httponly"] is True
+
+
+def test_other_sites_cannot_send_the_cookie(api_main, api_config, api_passwords):
+    """SameSite=Strict: a form or fetch started on another site goes out
+    without it, which is what stops CSRF."""
+    client = make_login_client(api_main, api_config, make_user(api_passwords))
+
+    assert set_cookie(login(client))["samesite"].lower() == "strict"
+
+
+def test_the_cookie_is_sent_to_the_whole_site(api_main, api_config, api_passwords):
+    """Path=/ so the browser sends it to /api/... and /ws/... alike, whatever
+    page the login came from."""
+    client = make_login_client(api_main, api_config, make_user(api_passwords))
+
+    assert set_cookie(login(client))["path"] == "/"
+
+
+def test_the_cookie_lasts_as_long_as_the_token(api_main, api_config, api_passwords):
+    """Not a minute longer: a browser keeping a dead token would send it on
+    every request for nothing."""
+    api_main.app.dependency_overrides[api_main.get_user_reader] = lambda: (
+        lambda email: make_user(api_passwords)
+    )
+    api_main.app.dependency_overrides[api_main.get_config] = lambda: (
+        api_config.load_config({"JWT_SECRET": SECRET, "JWT_EXPIRY_SECONDS": "900"})
+    )
+
+    response = login(TestClient(api_main.app))
+
+    assert set_cookie(response)["max-age"] == "900"
+
+
+def test_the_cookie_is_https_only_by_default(api_main, api_config, api_passwords):
+    client = make_login_client(api_main, api_config, make_user(api_passwords))
+
+    assert set_cookie(login(client))["secure"] is True
+
+
+def test_the_cookie_works_over_plain_http_when_configured(
+    api_main, api_config, api_passwords
+):
+    """The local stack is http://localhost:3000. A Secure cookie would never
+    be sent back there, and every request after login would be a 401."""
+    api_main.app.dependency_overrides[api_main.get_user_reader] = lambda: (
+        lambda email: make_user(api_passwords)
+    )
+    api_main.app.dependency_overrides[api_main.get_config] = lambda: (
+        api_config.load_config({"JWT_SECRET": SECRET, "COOKIE_SECURE": "false"})
+    )
+
+    response = login(TestClient(api_main.app))
+
+    assert not set_cookie(response)["secure"]
+
+
+def test_a_failed_login_sets_no_cookie(api_main, api_config, api_passwords):
+    client = make_login_client(api_main, api_config, make_user(api_passwords))
+
+    response = login(client, password="not-the-password")
+
+    assert set_cookie(response) is None
 
 
 def test_the_response_reports_the_users_role(api_main, api_config, api_passwords):
@@ -209,7 +289,7 @@ def test_the_token_decodes_to_the_email_and_role(
     admin = make_user(api_passwords, email="ada@example.com", role="admin")
     client = make_login_client(api_main, api_config, admin)
 
-    token = login(client).json()["access_token"]
+    token = set_cookie(login(client)).value
 
     claims = api_tokens.decode_token(SECRET, token)
     assert claims["sub"] == "ada@example.com"
@@ -325,8 +405,13 @@ def issue_token(
     )
 
 
-def bearer(token):
-    return {"Authorization": f"Bearer {token}"}
+def session_cookie(token):
+    """The Cookie header a browser sends once login has stored the cookie.
+
+    Sent by hand on each request rather than through the client's cookie jar,
+    so every test shows exactly what it sends.
+    """
+    return {"Cookie": f"session={token}"}
 
 
 def unsigned_token(email="ada@example.com", role="user"):
@@ -380,7 +465,7 @@ def test_candles_with_an_expired_token_is_rejected(api_main, api_config, api_tok
     client = make_real_auth_client(api_main, api_config)
     stale = issue_token(api_tokens, now=datetime.now(UTC) - timedelta(hours=2))
 
-    response = client.get("/candles?symbol=NVDA", headers=bearer(stale))
+    response = client.get("/candles?symbol=NVDA", headers=session_cookie(stale))
 
     assert response.status_code == 401
 
@@ -391,7 +476,7 @@ def test_candles_with_a_token_signed_by_another_secret_is_rejected(
     client = make_real_auth_client(api_main, api_config)
     forged = issue_token(api_tokens, secret=OTHER_SECRET)
 
-    response = client.get("/candles?symbol=NVDA", headers=bearer(forged))
+    response = client.get("/candles?symbol=NVDA", headers=session_cookie(forged))
 
     assert response.status_code == 401
 
@@ -400,33 +485,33 @@ def test_candles_with_an_unsigned_token_is_rejected(api_main, api_config):
     """A token claiming alg:none, asking to be trusted with no signature."""
     client = make_real_auth_client(api_main, api_config)
 
-    response = client.get("/candles?symbol=NVDA", headers=bearer(unsigned_token()))
+    response = client.get(
+        "/candles?symbol=NVDA", headers=session_cookie(unsigned_token())
+    )
 
     assert response.status_code == 401
 
 
-def test_candles_with_a_header_missing_the_bearer_prefix_is_rejected(
-    api_main, api_config, api_tokens
-):
-    """A perfectly good token, sent under the wrong scheme."""
+def test_candles_with_a_bearer_header_is_rejected(api_main, api_config, api_tokens):
+    """Cookie only. A perfectly good token in the old Authorization header is
+    no longer a way in, so there is one door to secure, not two."""
     client = make_real_auth_client(api_main, api_config)
     token = issue_token(api_tokens)
 
     response = client.get(
-        "/candles?symbol=NVDA", headers={"Authorization": f"Basic {token}"}
+        "/candles?symbol=NVDA", headers={"Authorization": f"Bearer {token}"}
     )
 
     assert response.status_code == 401
 
 
-def test_candles_with_a_malformed_authorization_header_is_rejected(
-    api_main, api_config
+def test_candles_with_the_token_under_another_cookie_name_is_rejected(
+    api_main, api_config, api_tokens
 ):
     client = make_real_auth_client(api_main, api_config)
+    token = issue_token(api_tokens)
 
-    response = client.get(
-        "/candles?symbol=NVDA", headers={"Authorization": "Bearer one two"}
-    )
+    response = client.get("/candles?symbol=NVDA", headers={"Cookie": f"token={token}"})
 
     assert response.status_code == 401
 
@@ -439,20 +524,80 @@ def test_a_plain_user_may_read_the_candles(
     client = make_real_auth_client(api_main, api_config, rows=[_candle_row()])
     token = issue_token(api_tokens, role="user")
 
-    response = client.get("/candles?symbol=NVDA", headers=bearer(token))
+    response = client.get("/candles?symbol=NVDA", headers=session_cookie(token))
 
     assert response.status_code == 200
     assert response.json()[0]["symbol"] == "NVDA"
 
 
-def test_the_rejection_names_the_bearer_scheme(api_main, api_config):
-    """401 tells the client how to fix itself; that is the whole point of the
-    header. 403 does not carry it, because there is nothing to retry."""
+# ------------------------------------------------------------- GET /auth/session
+
+SESSION_PATH = "/auth/session"
+
+
+def test_session_names_the_user_in_the_cookie(api_main, api_config, api_tokens):
+    """React cannot read an httpOnly cookie, so after a refresh this is how it
+    learns who is signed in."""
+    client = make_real_auth_client(api_main, api_config)
+    token = issue_token(api_tokens, email="ada@example.com", role="admin")
+
+    response = client.get(SESSION_PATH, headers=session_cookie(token))
+
+    assert response.status_code == 200
+    assert response.json() == {"email": "ada@example.com", "role": "admin"}
+
+
+def test_session_without_a_cookie_is_unauthorised(api_main, api_config):
+    """The answer React turns into the login page."""
     client = make_real_auth_client(api_main, api_config)
 
-    response = client.get("/candles?symbol=NVDA")
+    assert client.get(SESSION_PATH).status_code == 401
 
-    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+def test_session_with_an_expired_cookie_is_unauthorised(
+    api_main, api_config, api_tokens
+):
+    client = make_real_auth_client(api_main, api_config)
+    stale = issue_token(api_tokens, now=datetime.now(UTC) - timedelta(hours=2))
+
+    assert client.get(SESSION_PATH, headers=session_cookie(stale)).status_code == 401
+
+
+# -------------------------------------------------------------- POST /auth/logout
+
+LOGOUT_PATH = "/auth/logout"
+
+
+def test_logout_answers_with_no_body(api_main, api_config, api_tokens):
+    client = make_real_auth_client(api_main, api_config)
+
+    response = client.post(LOGOUT_PATH, headers=session_cookie(issue_token(api_tokens)))
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_logout_tells_the_browser_to_drop_the_cookie(api_main, api_config, api_tokens):
+    """JavaScript cannot delete an httpOnly cookie, so the api does it: the
+    same name with Max-Age=0 makes the browser throw it away."""
+    client = make_real_auth_client(api_main, api_config)
+
+    response = client.post(LOGOUT_PATH, headers=session_cookie(issue_token(api_tokens)))
+
+    dropped = set_cookie(response)
+    assert dropped["max-age"] == "0"
+    assert dropped["path"] == "/"
+
+
+def test_logout_works_without_a_valid_cookie(api_main, api_config):
+    """Signing out must always work, even with an expired or broken cookie:
+    that is exactly when a user wants it gone."""
+    client = make_real_auth_client(api_main, api_config)
+
+    response = client.post(LOGOUT_PATH, headers=session_cookie("not-a-token"))
+
+    assert response.status_code == 204
+    assert set_cookie(response)["max-age"] == "0"
 
 
 # --------------------------------------------------------- POST /auth/register
@@ -607,7 +752,7 @@ def test_an_admin_deletes_an_alert(api_main, api_config, api_tokens):
     client, _ = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="admin")
 
-    response = delete_alert(client, headers=bearer(token))
+    response = delete_alert(client, headers=session_cookie(token))
 
     assert response.status_code == 204
 
@@ -618,7 +763,7 @@ def test_the_alert_id_reaches_the_deleter(api_main, api_config, api_tokens):
     client, calls = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="admin")
 
-    delete_alert(client, alert_id=42, headers=bearer(token))
+    delete_alert(client, alert_id=42, headers=session_cookie(token))
 
     assert calls[0] == 42
 
@@ -629,7 +774,7 @@ def test_a_deleted_alert_returns_no_body(api_main, api_config, api_tokens):
     client, _ = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="admin")
 
-    response = delete_alert(client, headers=bearer(token))
+    response = delete_alert(client, headers=session_cookie(token))
 
     assert response.content == b""
 
@@ -640,7 +785,7 @@ def test_a_plain_user_may_not_delete_an_alert(api_main, api_config, api_tokens):
     client, calls = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="user")
 
-    response = delete_alert(client, headers=bearer(token))
+    response = delete_alert(client, headers=session_cookie(token))
 
     assert response.status_code == 403
     assert calls == []
@@ -667,7 +812,7 @@ def test_a_token_claiming_an_unknown_role_may_not_delete_an_alert(
     client, calls = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="superuser")
 
-    response = delete_alert(client, headers=bearer(token))
+    response = delete_alert(client, headers=session_cookie(token))
 
     assert response.status_code == 403
     assert calls == []
@@ -681,7 +826,9 @@ def test_deleting_an_alert_that_is_not_there_is_a_not_found(
     client, _ = make_delete_client(api_main, api_config, removed=0)
     token = issue_token(api_tokens, role="admin")
 
-    response = delete_alert(client, alert_id=MISSING_ALERT_ID, headers=bearer(token))
+    response = delete_alert(
+        client, alert_id=MISSING_ALERT_ID, headers=session_cookie(token)
+    )
 
     assert response.status_code == 404
 
@@ -690,7 +837,7 @@ def test_an_alert_id_that_is_not_a_number_is_rejected(api_main, api_config, api_
     client, _ = make_delete_client(api_main, api_config)
     token = issue_token(api_tokens, role="admin")
 
-    response = client.delete("/alerts/abc", headers=bearer(token))
+    response = client.delete("/alerts/abc", headers=session_cookie(token))
 
     assert response.status_code == 422
 
@@ -724,7 +871,7 @@ def test_a_new_alert_belongs_to_the_user_in_the_token(api_main, api_config, api_
     client, calls = make_create_client(api_main, api_config)
     token = issue_token(api_tokens, email="ada@example.com")
 
-    response = client.post(ALERTS_PATH, json=NEW_ALERT, headers=bearer(token))
+    response = client.post(ALERTS_PATH, json=NEW_ALERT, headers=session_cookie(token))
 
     assert response.status_code == 201
     assert response.json()["alert_id"] == NEW_ALERT_ID
@@ -740,7 +887,7 @@ def test_the_request_body_cannot_choose_the_owner(api_main, api_config, api_toke
     client.post(
         ALERTS_PATH,
         json={**NEW_ALERT, "email": "grace@example.com"},
-        headers=bearer(token),
+        headers=session_cookie(token),
     )
 
     assert calls[0]["email"] == "ada@example.com"
@@ -755,7 +902,9 @@ def test_a_new_alert_symbol_is_trimmed_and_upper_cased(
     token = issue_token(api_tokens)
 
     client.post(
-        ALERTS_PATH, json={**NEW_ALERT, "symbol": "  nvda "}, headers=bearer(token)
+        ALERTS_PATH,
+        json={**NEW_ALERT, "symbol": "  nvda "},
+        headers=session_cookie(token),
     )
 
     assert calls[0]["symbol"] == "NVDA"
@@ -777,7 +926,7 @@ def test_an_alert_for_an_account_that_is_gone_is_unauthorised(
     client, _ = make_create_client(api_main, api_config, created_id=None)
     token = issue_token(api_tokens)
 
-    response = client.post(ALERTS_PATH, json=NEW_ALERT, headers=bearer(token))
+    response = client.post(ALERTS_PATH, json=NEW_ALERT, headers=session_cookie(token))
 
     assert response.status_code == 401
 
@@ -798,7 +947,7 @@ def test_an_invalid_alert_is_rejected(api_main, api_config, api_tokens, bad_fiel
     token = issue_token(api_tokens)
 
     response = client.post(
-        ALERTS_PATH, json={**NEW_ALERT, **bad_field}, headers=bearer(token)
+        ALERTS_PATH, json={**NEW_ALERT, **bad_field}, headers=session_cookie(token)
     )
 
     assert response.status_code == 422
@@ -838,7 +987,7 @@ def test_a_plain_user_lists_only_their_own_alerts(api_main, api_config, api_toke
     client, calls = make_list_client(api_main, api_config)
     token = issue_token(api_tokens, email="ada@example.com", role="user")
 
-    client.get(ALERTS_PATH, headers=bearer(token))
+    client.get(ALERTS_PATH, headers=session_cookie(token))
 
     assert calls == ["ada@example.com"]
 
@@ -848,7 +997,7 @@ def test_an_admin_lists_everyones_alerts(api_main, api_config, api_tokens):
     client, calls = make_list_client(api_main, api_config)
     token = issue_token(api_tokens, email="root@example.com", role="admin")
 
-    client.get(ALERTS_PATH, headers=bearer(token))
+    client.get(ALERTS_PATH, headers=session_cookie(token))
 
     assert calls == [None]
 
@@ -857,7 +1006,7 @@ def test_listed_alerts_come_back_serialised(api_main, api_config, api_tokens):
     client, _ = make_list_client(api_main, api_config, rows=[_listed_alert()])
     token = issue_token(api_tokens)
 
-    response = client.get(ALERTS_PATH, headers=bearer(token))
+    response = client.get(ALERTS_PATH, headers=session_cookie(token))
 
     assert response.status_code == 200
     body = response.json()

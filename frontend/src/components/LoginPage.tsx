@@ -1,12 +1,11 @@
 import { useState, type SubmitEvent } from 'react'
-import { ApiError, login, register } from '../api'
-import type { Session } from '../session'
+import { ApiError, login, register, type User } from '../api'
 import Logo from './Logo'
 
 interface LoginPageProps {
   // Shown above the form, e.g. "your session has expired".
   readonly notice: string | null
-  readonly onSignIn: (session: Session) => void
+  readonly onSignIn: (user: User) => void
 }
 
 type Mode = 'signIn' | 'register'
@@ -87,8 +86,7 @@ function LoginPage({ notice, onSignIn }: LoginPageProps) {
       if (isRegistering) {
         await register(cleanEmail, password)
       }
-      const result = await login(cleanEmail, password)
-      onSignIn({ token: result.token, role: result.role, email: cleanEmail })
+      onSignIn(await login(cleanEmail, password))
     } catch (caught) {
       setError(errorMessage(caught, mode))
       setIsSubmitting(false)

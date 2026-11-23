@@ -5,14 +5,15 @@ passes /api/... and /ws/... on to the api. Only a real request through the
 real image shows that its config works.
 """
 
-import json
-
 import pytest
 import requests
 import websocket
 
 FRONTEND_PORT = 80
 TIMEOUT_SECONDS = 10
+
+# A session cookie whose token the api cannot decode.
+BAD_COOKIE = "session=not-a-real-token"
 
 # The div React draws into. Seeing it means we got index.html back.
 REACT_ROOT = '<div id="root"></div>'
@@ -55,8 +56,10 @@ def test_the_frontend_strips_the_api_prefix(frontend_address, admin_token):
     assert response.json() == {"status": "ok"}
 
 
-def test_the_frontend_passes_the_token_on_to_the_api(frontend_address, admin_headers):
-    """/symbols needs a token, so a 200 means the Authorization header made
+def test_the_frontend_passes_the_session_cookie_on_to_the_api(
+    frontend_address, admin_headers
+):
+    """/symbols needs a signed-in user, so a 200 means the Cookie header made
     it through nginx."""
     response = requests.get(
         f"http://{frontend_address}/api/symbols",
@@ -68,14 +71,30 @@ def test_the_frontend_passes_the_token_on_to_the_api(frontend_address, admin_hea
     assert isinstance(response.json(), list)
 
 
+def test_the_frontend_answers_who_is_signed_in(frontend_address, admin_headers):
+    """React's first call on every page load. If nginx broke it, nobody would
+    get past "Checking your sign-in"."""
+    response = requests.get(
+        f"http://{frontend_address}/api/auth/session",
+        headers=admin_headers,
+        timeout=TIMEOUT_SECONDS,
+    )
+
+    assert response.status_code == 200
+    # The seeded admin from docker-compose.e2e.yaml.
+    assert response.json() == {"email": "admin@example.com", "role": "admin"}
+
+
 def test_the_frontend_upgrades_the_candle_websocket(frontend_address, admin_token):
-    """A wrong token gets close code 1008 from the api itself. Receiving it
-    means the WebSocket handshake went through nginx and reached the api."""
+    """A wrong cookie gets close code 1008 from the api itself. Receiving it
+    means the WebSocket handshake, cookie included, went through nginx and
+    reached the api."""
     connection = websocket.create_connection(
-        f"ws://{frontend_address}/ws/candles?symbol=NVDA", timeout=TIMEOUT_SECONDS
+        f"ws://{frontend_address}/ws/candles?symbol=NVDA",
+        cookie=BAD_COOKIE,
+        timeout=TIMEOUT_SECONDS,
     )
     try:
-        connection.send(json.dumps({"token": "not-a-real-token"}))
         opcode, frame = connection.recv_data_frame(control_frame=True)
     finally:
         connection.close()

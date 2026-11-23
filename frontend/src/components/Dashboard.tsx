@@ -1,23 +1,22 @@
 import { useState } from 'react'
-import type { Session } from '../session'
+import type { User } from '../api'
 import { EMPTY_SYMBOL, useMarketData } from '../useMarketData'
 import CandleChart from './CandleChart'
 import SymbolHeader from './SymbolHeader'
 import TopBar from './TopBar'
 import Watchlist from './Watchlist'
 
-const SESSION_EXPIRED = 'Your session has expired. Please sign in again.'
-
 interface DashboardProps {
-  readonly session: Session
-  // null: the user chose to sign out, so no message on the login page.
-  readonly onSignOut: (notice: string | null) => void
+  readonly user: User
+  // Set when sign-out never reached the server: the user is still signed in.
+  readonly signOutError: string | null
+  readonly onSignOut: () => void
+  // The api answered 401: the session cookie has expired.
+  readonly onExpired: () => void
 }
 
-function Dashboard({ session, onSignOut }: DashboardProps) {
-  const { symbols, market, error } = useMarketData(session.token, () =>
-    onSignOut(SESSION_EXPIRED),
-  )
+function Dashboard({ user, signOutError, onSignOut, onExpired }: DashboardProps) {
+  const { symbols, market, error } = useMarketData(onExpired)
   const [selected, setSelected] = useState<string | null>(null)
 
   // Until the user picks one, show the first followed symbol.
@@ -27,7 +26,13 @@ function Dashboard({ session, onSignOut }: DashboardProps) {
 
   return (
     <div className="dashboard">
-      <TopBar session={session} statuses={statuses} onSignOut={() => onSignOut(null)} />
+      <TopBar user={user} statuses={statuses} onSignOut={onSignOut} />
+
+      {signOutError !== null && (
+        <p className="banner banner-error" role="alert">
+          {signOutError}
+        </p>
+      )}
 
       {error !== null && (
         <p className="banner banner-error" role="alert">

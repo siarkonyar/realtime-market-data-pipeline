@@ -1,9 +1,9 @@
+import type { User } from '../api'
 import type { LiveStatus } from '../liveSocket'
-import type { Session } from '../session'
 import Logo from './Logo'
 
 interface TopBarProps {
-  readonly session: Session
+  readonly user: User
   // One per followed symbol, in the watchlist's order.
   readonly statuses: readonly LiveStatus[]
   readonly onSignOut: () => void
@@ -25,7 +25,7 @@ function overallConnection(statuses: readonly LiveStatus[]): Connection {
   return statuses.includes('reconnecting') ? 'reconnecting' : 'connecting'
 }
 
-function TopBar({ session, statuses, onSignOut }: TopBarProps) {
+function TopBar({ user, statuses, onSignOut }: TopBarProps) {
   const connection = overallConnection(statuses)
 
   return (
@@ -41,8 +41,8 @@ function TopBar({ session, statuses, onSignOut }: TopBarProps) {
           {CONNECTION_LABELS[connection]}
         </span>
         <span className="user">
-          <span className="user-email">{session.email}</span>
-          <span className="role">{session.role}</span>
+          <span className="user-email">{user.email}</span>
+          <span className="role">{user.role}</span>
         </span>
         <button className="button-ghost" type="button" onClick={onSignOut}>
           Sign out

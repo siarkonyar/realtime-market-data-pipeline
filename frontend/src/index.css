@@ -265,6 +265,16 @@ h1 {
   color: var(--text-muted);
 }
 
+.app-offline {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.app-offline p {
+  margin: 0;
+}
+
 .dashboard {
   min-height: 100vh;
   display: flex;

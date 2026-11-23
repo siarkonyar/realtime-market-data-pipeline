@@ -52,7 +52,7 @@ export interface MarketData {
 
 // The followed symbols, 24 hours of history for each, and one WebSocket per
 // symbol that keeps the newest candle live.
-export function useMarketData(token: string, onUnauthorized: () => void): MarketData {
+export function useMarketData(onUnauthorized: () => void): MarketData {
   const [symbols, setSymbols] = useState<readonly string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [market, dispatch] = useReducer(reducer, {})
@@ -73,24 +73,24 @@ export function useMarketData(token: string, onUnauthorized: () => void): Market
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchSymbols(token, controller.signal).then(setSymbols, (caught) => handleFailure(caught))
+    fetchSymbols(controller.signal).then(setSymbols, (caught) => handleFailure(caught))
     return () => controller.abort()
-  }, [token])
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
     for (const symbol of symbols) {
-      fetchCandles(symbol, token, controller.signal).then(
+      fetchCandles(symbol, controller.signal).then(
         (candles) => dispatch({ type: 'history', symbol, candles }),
         (caught) => handleFailure(caught),
       )
     }
     return () => controller.abort()
-  }, [symbols, token])
+  }, [symbols])
 
   useEffect(() => {
     const stops = symbols.map((symbol) =>
-      openLiveCandles(symbol, token, {
+      openLiveCandles(symbol, {
         onCandle: (candle) =>
           dispatch({ type: 'candle', symbol, candle, receivedAt: Date.now() }),
         onStatus: (status) => {
@@ -106,7 +106,7 @@ export function useMarketData(token: string, onUnauthorized: () => void): Market
         stop()
       }
     }
-  }, [symbols, token])
+  }, [symbols])
 
   return { symbols, market, error }
 }

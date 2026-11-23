@@ -530,35 +530,37 @@ def test_a_plain_user_may_read_the_candles(
     assert response.json()[0]["symbol"] == "NVDA"
 
 
-# ------------------------------------------------------------------ GET /auth/me
+# ------------------------------------------------------------- GET /auth/session
 
-ME_PATH = "/auth/me"
+SESSION_PATH = "/auth/session"
 
 
-def test_me_names_the_user_in_the_cookie(api_main, api_config, api_tokens):
+def test_session_names_the_user_in_the_cookie(api_main, api_config, api_tokens):
     """React cannot read an httpOnly cookie, so after a refresh this is how it
     learns who is signed in."""
     client = make_real_auth_client(api_main, api_config)
     token = issue_token(api_tokens, email="ada@example.com", role="admin")
 
-    response = client.get(ME_PATH, headers=session_cookie(token))
+    response = client.get(SESSION_PATH, headers=session_cookie(token))
 
     assert response.status_code == 200
     assert response.json() == {"email": "ada@example.com", "role": "admin"}
 
 
-def test_me_without_a_cookie_is_unauthorised(api_main, api_config):
+def test_session_without_a_cookie_is_unauthorised(api_main, api_config):
     """The answer React turns into the login page."""
     client = make_real_auth_client(api_main, api_config)
 
-    assert client.get(ME_PATH).status_code == 401
+    assert client.get(SESSION_PATH).status_code == 401
 
 
-def test_me_with_an_expired_cookie_is_unauthorised(api_main, api_config, api_tokens):
+def test_session_with_an_expired_cookie_is_unauthorised(
+    api_main, api_config, api_tokens
+):
     client = make_real_auth_client(api_main, api_config)
     stale = issue_token(api_tokens, now=datetime.now(UTC) - timedelta(hours=2))
 
-    assert client.get(ME_PATH, headers=session_cookie(stale)).status_code == 401
+    assert client.get(SESSION_PATH, headers=session_cookie(stale)).status_code == 401
 
 
 # -------------------------------------------------------------- POST /auth/logout

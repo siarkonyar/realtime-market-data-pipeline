@@ -351,8 +351,8 @@ def login(
     return {"email": email, "role": user.role}
 
 
-@app.get("/auth/me")
-def me(user: AuthenticatedUser = Depends(get_current_user)):
+@app.get("/auth/session")
+def current_session(user: AuthenticatedUser = Depends(get_current_user)):
     """Who the cookie belongs to. React cannot read an httpOnly cookie, so it
     asks here once on page load."""
     return {"email": user.email, "role": user.role}

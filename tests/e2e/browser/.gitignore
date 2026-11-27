@@ -1,0 +1,5 @@
+# Installed by `npm ci` from package-lock.json, never committed.
+node_modules
+# Written by `npm test`: screenshots, traces and the HTML report.
+test-results
+playwright-report
